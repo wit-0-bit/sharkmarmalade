@@ -25,6 +25,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.artistsApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
@@ -58,44 +60,49 @@ class JellyfinMediaTree(
     private val lastRevalidated = ConcurrentHashMap<String, Long>()
     private val revalidationsInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    // One lock per item id, so concurrent cold misses for the same id don't issue redundant
+    // network calls and clobber each other's cache entry. Different ids proceed in parallel.
+    private val itemLocks = ConcurrentHashMap<String, Mutex>()
+
     var onChildrenUpdated: ((parentId: String, itemCount: Int) -> Unit)? = null
 
     suspend fun getItem(id: String): MediaItem {
-        if (mediaItems.getIfPresent(id) == null) {
-            // Cache miss
-            val newItem = when (id) {
-                ROOT_ID -> itemFactory.rootNode()
-                LATEST_ALBUMS -> itemFactory.latestAlbums()
-                RANDOM_ALBUMS -> itemFactory.randomAlbums()
-                FAVOURITES -> itemFactory.favourites()
-                PLAYLISTS -> itemFactory.playlists()
-                ARTISTS -> itemFactory.artists()
-                BROWSE -> itemFactory.browse()
-                BROWSE_ARTISTS -> itemFactory.browseArtists()
-                GENRES -> itemFactory.genres()
-                ALBUMS -> itemFactory.albums()
-                else -> if (id.startsWith(PLAY_ALL_PREFIX)) {
-                    val parentId = id.removePrefix(PLAY_ALL_PREFIX)
-                    val isArtist = getItem(parentId).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST
-                    itemFactory.playAllRow(parentId, isArtist)
-                } else {
-                    // Stream URLs / art URIs are rebuilt by the factory on every create().
-                    val cached = diskCache.readItem(id)
-                    val dto = cached
-                        ?: api.userLibraryApi.getItem(id.toUUID()).content.also {
-                            revalidationScope.launch { diskCache.writeItem(it) }
-                        }
-                    if (cached != null) {
-                        revalidateItem(id)
-                    }
-                    itemFactory.create(dto)
-                }
-            }
-
-            mediaItems.put(id, newItem)
+        mediaItems.getIfPresent(id)?.let { return it }
+        return itemLocks.getOrPut(id) { Mutex() }.withLock {
+            // Double-check inside the lock: another caller may have loaded it while we waited.
+            mediaItems.getIfPresent(id) ?: loadItem(id).also { mediaItems.put(id, it) }
         }
+    }
 
-        return mediaItems.getIfPresent(id)!!
+    private suspend fun loadItem(id: String): MediaItem {
+        return when (id) {
+            ROOT_ID -> itemFactory.rootNode()
+            LATEST_ALBUMS -> itemFactory.latestAlbums()
+            RANDOM_ALBUMS -> itemFactory.randomAlbums()
+            FAVOURITES -> itemFactory.favourites()
+            PLAYLISTS -> itemFactory.playlists()
+            ARTISTS -> itemFactory.artists()
+            BROWSE -> itemFactory.browse()
+            BROWSE_ARTISTS -> itemFactory.browseArtists()
+            GENRES -> itemFactory.genres()
+            ALBUMS -> itemFactory.albums()
+            else -> if (id.startsWith(PLAY_ALL_PREFIX)) {
+                val parentId = id.removePrefix(PLAY_ALL_PREFIX)
+                val isArtist = getItem(parentId).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST
+                itemFactory.playAllRow(parentId, isArtist)
+            } else {
+                // Stream URLs / art URIs are rebuilt by the factory on every create().
+                val cached = diskCache.readItem(id)
+                val dto = cached
+                    ?: api.userLibraryApi.getItem(id.toUUID()).content.also {
+                        revalidationScope.launch { diskCache.writeItem(it) }
+                    }
+                if (cached != null) {
+                    revalidateItem(id)
+                }
+                itemFactory.create(dto)
+            }
+        }
     }
 
     suspend fun getChildren(id: String): List<MediaItem> {
@@ -227,33 +234,25 @@ class JellyfinMediaTree(
     // not trigger UI refreshes.
     private fun fingerprint(dto: BaseItemDto) = "${dto.id}|${dto.name}|${dto.userData?.isFavorite}"
 
-    private fun buildItems(dtos: List<BaseItemDto>): List<MediaItem> {
-        return dtos.map {
-            val item = itemFactory.create(it)
+    // Builds and caches a MediaItem, skipping (rather than throwing on) any item kind the factory
+    // can't handle — e.g. a video item inside a mixed playlist — so one bad child can never break
+    // the whole browse or playback expansion.
+    private fun buildItem(dto: BaseItemDto, group: String? = null): MediaItem? {
+        return try {
+            val item = itemFactory.create(dto, group)
             mediaItems.put(item.mediaId, item)
             item
+        } catch (e: Exception) {
+            Log.w(LOG_MARKER, "Skipping unsupported item ${dto.id} (${dto.type})", e)
+            null
         }
     }
 
-    private fun buildFavouriteItems(dtos: List<BaseItemDto>): List<MediaItem> {
-        return dtos.map {
-            val item = itemFactory.create(
-                it,
-                groupForItem(it),
-                parent = FAVOURITES
-            )
-            mediaItems.put(item.mediaId, item)
-            item
-        }
-    }
+    private fun buildItems(dtos: List<BaseItemDto>): List<MediaItem> =
+        dtos.mapNotNull { buildItem(it) }
 
-    private fun buildChildItems(parentId: String, dtos: List<BaseItemDto>): List<MediaItem> {
-        return dtos.map {
-            val item = itemFactory.create(it, parent = parentId)
-            mediaItems.put(item.mediaId, item)
-            item
-        }
-    }
+    private fun buildFavouriteItems(dtos: List<BaseItemDto>): List<MediaItem> =
+        dtos.mapNotNull { buildItem(it, groupForItem(it)) }
 
     private suspend fun fetchLatestAlbums(): List<BaseItemDto> {
         return api.userLibraryApi.getLatestMedia(
@@ -272,11 +271,7 @@ class JellyfinMediaTree(
             limit = maxItemsPerPage
         )
 
-        return response.content.items.map {
-            val item = itemFactory.create(it)
-            mediaItems.put(item.mediaId, item)
-            item
-        }
+        return response.content.items.mapNotNull { buildItem(it) }
     }
 
     private suspend fun fetchPlaylists(): List<BaseItemDto> {
@@ -315,7 +310,7 @@ class JellyfinMediaTree(
 
         // No Play All row for albums: tapping any track already queues the whole album in order
         // via the PARENT_KEY expansion, so the row would be redundant with tapping track 1.
-        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) { buildChildItems(id, it) }
+        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) { buildItems(it) }
     }
 
     /**
@@ -333,10 +328,13 @@ class JellyfinMediaTree(
     }
 
     // No limit: these children are queued for playback, so truncating them changes what plays.
+    // Restricted to AUDIO so a mixed/video playlist can't feed a non-audio child into the factory
+    // (which would otherwise throw and break the whole browse/play).
     private suspend fun fetchItemChildren(id: String, sortBy: List<ItemSortBy>): List<BaseItemDto> {
         return api.itemsApi.getItems(
             sortBy = sortBy,
-            parentId = id.toUUID()
+            parentId = id.toUUID(),
+            includeItemTypes = listOf(BaseItemKind.AUDIO)
         ).content.items
     }
 
@@ -393,7 +391,8 @@ class JellyfinMediaTree(
                 BaseItemKind.AUDIO,
                 BaseItemKind.MUSIC_ALBUM,
                 BaseItemKind.MUSIC_ARTIST
-            )
+            ),
+            limit = maxItemsPerPage
         ).content.items
     }
 
@@ -415,10 +414,8 @@ class JellyfinMediaTree(
             limit = 10,
         )
 
-        items.addAll(response.content.items.map {
-            val item = itemFactory.create(it, context.getString(R.string.artists))
-            mediaItems.put(item.mediaId, item)
-            item
+        items.addAll(response.content.items.mapNotNull {
+            buildItem(it, context.getString(R.string.artists))
         })
 
         response = api.itemsApi.getItems(
@@ -428,10 +425,8 @@ class JellyfinMediaTree(
             limit = 10
         )
 
-        items.addAll(response.content.items.map {
-            val item = itemFactory.create(it, context.getString(R.string.albums))
-            mediaItems.put(item.mediaId, item)
-            item
+        items.addAll(response.content.items.mapNotNull {
+            buildItem(it, context.getString(R.string.albums))
         })
 
         response = api.itemsApi.getItems(
@@ -441,10 +436,8 @@ class JellyfinMediaTree(
             limit = 10
         )
 
-        items.addAll(response.content.items.map {
-            val item = itemFactory.create(it, context.getString(R.string.playlists))
-            mediaItems.put(item.mediaId, item)
-            item
+        items.addAll(response.content.items.mapNotNull {
+            buildItem(it, context.getString(R.string.playlists))
         })
 
 
@@ -455,10 +448,8 @@ class JellyfinMediaTree(
             limit = 20
         )
 
-        items.addAll(response.content.items.map {
-            val item = itemFactory.create(it, context.getString(R.string.tracks))
-            mediaItems.put(item.mediaId, item)
-            item
+        items.addAll(response.content.items.mapNotNull {
+            buildItem(it, context.getString(R.string.tracks))
         })
 
         return items

@@ -347,8 +347,7 @@ class MediaItemFactory(
 
     private fun forTrack(
         item: BaseItemDto,
-        group: String? = null,
-        parent: String? = null
+        group: String? = null
     ): MediaItem {
         // Use the album ID for album art, if present.
         // This way, all tracks in an album have the same URI, which saves some downloads.
@@ -392,9 +391,11 @@ class MediaItemFactory(
             extras.putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, group)
         }
 
-        if (parent != null) {
-            extras.putString(PARENT_KEY, parent)
-        }
+        // A track's "play all" context is its own album, taken straight from the DTO. Using the
+        // intrinsic album id (instead of the screen the track happened to be browsed from) means
+        // the context survives a cold rebuild from disk/network and can never be clobbered in the
+        // shared id-keyed cache by an unrelated browse — tapping a track always queues its album.
+        item.albumId?.let { extras.putString(PARENT_KEY, it.toString()) }
 
         val metadata = MediaMetadata.Builder()
             .setTitle(item.name)
@@ -438,15 +439,14 @@ class MediaItemFactory(
 
     fun create(
         baseItemDto: BaseItemDto,
-        group: String? = null,
-        parent: String? = null
+        group: String? = null
     ): MediaItem {
         return when (baseItemDto.type) {
             BaseItemKind.MUSIC_ARTIST -> forArtist(baseItemDto, group)
             BaseItemKind.MUSIC_GENRE -> forGenre(baseItemDto, group)
             BaseItemKind.MUSIC_ALBUM -> forAlbum(baseItemDto, group)
             BaseItemKind.PLAYLIST -> forPlaylist(baseItemDto, group)
-            BaseItemKind.AUDIO -> forTrack(baseItemDto, group, parent)
+            BaseItemKind.AUDIO -> forTrack(baseItemDto, group)
             else -> throw UnsupportedOperationException("Can't create mediaItem for ${baseItemDto.type}")
         }
     }
