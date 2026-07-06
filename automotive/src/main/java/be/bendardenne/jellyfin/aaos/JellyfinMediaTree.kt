@@ -313,14 +313,9 @@ class JellyfinMediaTree(
             sortBy = listOf(ItemSortBy.DEFAULT)
         }
 
-        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) {
-            val children = buildChildItems(id, it)
-            if (mediaType == MEDIA_TYPE_ALBUM) {
-                withPlayAll(id, isArtist = false, children)
-            } else {
-                children
-            }
-        }
+        // No Play All row for albums: tapping any track already queues the whole album in order
+        // via the PARENT_KEY expansion, so the row would be redundant with tapping track 1.
+        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) { buildChildItems(id, it) }
     }
 
     /**

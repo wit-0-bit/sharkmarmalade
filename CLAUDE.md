@@ -208,7 +208,12 @@ which errored out once and was re-run) directly by whoever wrote this doc.
 ## Recommended direction: Artists → Albums → Songs drilldown
 
 > **Status (2026-07-05): IMPLEMENTED** on the `browse-redesign` branch (built, adversarially
-> verified, installed to the emulator). The section below is the spec it was built from. Known
+> verified, installed to the emulator). The section below is the spec it was built from, with one
+> post-implementation amendment from the app owner: the **"▶ Play album" row was dropped** —
+> tapping any track already queues the whole album in order via the PARENT_KEY expansion, so the
+> row was redundant with tapping track 1. Only artists get a pinned row ("▶ Shuffle all songs",
+> which has no equivalent path). The album flavor of `playAllRow()`/`resolvePlayAll()`/
+> `getItem(PLAY_ALL:...)` is kept so a host holding a stale cached row still resolves gracefully. Known
 > accepted residuals from verification: `resolvePlayAll` also flips shuffle mode on the
 > add-to-queue (`onAddMediaItems`) path; the revalidation `notifyChildrenChanged` itemCount is
 > one lower than what browse returns for parents with a synthetic row (hint-only, harmless);

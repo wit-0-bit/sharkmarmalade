@@ -99,8 +99,9 @@ Lower priority: real but low-impact, speculative, or purely maintainability.
 - [ ] Fix (or at least prioritize) the `mediaItems` cache-clobbering bug in Known Issues before/
       alongside this redesign — its most concrete repro scenario (Favourites vs. Playlist
       `PARENT_KEY` collision) stays fully live now that both are back in the app.
-- [x] Implement the pinned "▶ Play All" synthetic row (shuffle for Artist, in-order for Album) —
-      done as part of the redesign (see above). Low-severity residuals worth a later pass:
+- [x] Implement the pinned "▶ Play All" synthetic row — done as part of the redesign, then
+      narrowed per the app owner: artists only ("Shuffle all songs"); the album row was dropped as
+      redundant with tapping track 1 (PARENT_KEY expansion already queues the full album). Low-severity residuals worth a later pass:
       shuffle-mode side effect on the add-to-queue path, sequential album gathering on first
       shuffle-all tap, notify itemCount off-by-one for synthetic-row parents.
 - [ ] Add Google Assistant **App Actions** (`actions.intent.PLAY_MEDIA` via `shortcuts.xml`) so
