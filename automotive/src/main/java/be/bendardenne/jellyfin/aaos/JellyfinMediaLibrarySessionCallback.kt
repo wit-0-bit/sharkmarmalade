@@ -379,7 +379,7 @@ class JellyfinMediaLibrarySessionCallback(
 
                 val mediaItemsWithStartPosition = MediaSession.MediaItemsWithStartPosition(
                     resolvedItems,
-                    resolvedItems.indexOfFirst { it.mediaId == singleItem.mediaId },
+                    resolvedItems.indexOfFirst { it.mediaId == singleItem.mediaId }.coerceAtLeast(0),
                     startPositionMs
                 )
                 savePlaylist(resolvedItems)
@@ -618,8 +618,23 @@ class JellyfinMediaLibrarySessionCallback(
 
     private suspend fun expandSingleItem(item: MediaItem): List<MediaItem> {
         // This could load a lot of tracks if the parent has many children.
-        val parentId = tree.getItem(item.mediaId).mediaMetadata.extras?.getString(PARENT_KEY)!!
-        return resolveMediaItems(tree.getChildren(parentId))
+        val parentId = tree.getItem(item.mediaId).mediaMetadata.extras?.getString(PARENT_KEY)
+            ?: return resolveMediaItems(listOf(item))
+
+        // The parent (e.g. the track's own album) may be unreachable, or its cached child list
+        // stale and missing this track. Fall back to playing just the tapped track so a tap always
+        // plays *something* instead of silently doing nothing (onSetMediaItems ignores a failure).
+        val expanded = try {
+            resolveMediaItems(tree.getChildren(parentId))
+        } catch (e: Exception) {
+            Log.w(LOG_MARKER, "Failed to expand parent $parentId; playing the single item", e)
+            emptyList()
+        }
+        return if (expanded.any { it.mediaId == item.mediaId }) {
+            expanded
+        } else {
+            resolveMediaItems(listOf(item))
+        }
     }
 
     /**

@@ -60,15 +60,20 @@ class JellyfinMediaTree(
     private val lastRevalidated = ConcurrentHashMap<String, Long>()
     private val revalidationsInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    // One lock per item id, so concurrent cold misses for the same id don't issue redundant
-    // network calls and clobber each other's cache entry. Different ids proceed in parallel.
-    private val itemLocks = ConcurrentHashMap<String, Mutex>()
+    // A fixed set of striped locks — bounded, unlike a per-id map that would grow for the whole
+    // process lifetime. Concurrent cold misses for the same id land on the same stripe and
+    // serialize (so they don't double-fetch and clobber each other); different ids almost always
+    // hit different stripes and proceed in parallel.
+    private val itemLocks = Array(64) { Mutex() }
+
+    private fun lockFor(id: String): Mutex =
+        itemLocks[(id.hashCode() and 0x7fffffff) % itemLocks.size]
 
     var onChildrenUpdated: ((parentId: String, itemCount: Int) -> Unit)? = null
 
     suspend fun getItem(id: String): MediaItem {
         mediaItems.getIfPresent(id)?.let { return it }
-        return itemLocks.getOrPut(id) { Mutex() }.withLock {
+        return lockFor(id).withLock {
             // Double-check inside the lock: another caller may have loaded it while we waited.
             mediaItems.getIfPresent(id) ?: loadItem(id).also { mediaItems.put(id, it) }
         }

@@ -106,8 +106,14 @@ class AlbumArtContentProvider : ContentProvider() {
         // from uri.path, so art requested after a process restart (or after its mapping was
         // LRU-evicted) still resolves as long as the bytes are on disk.
         if (file.exists()) {
-            Log.d(LOG_MARKER, "Returning existing file for $uri: $file")
-            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            try {
+                Log.d(LOG_MARKER, "Returning existing file for $uri: $file")
+                return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            } catch (e: FileNotFoundException) {
+                // Raced with a cache trim that deleted it between exists() and open(); fall
+                // through and re-download.
+                Log.d(LOG_MARKER, "Cached art vanished (trim race), re-downloading $uri")
+            }
         }
 
         // The remote URI is only needed to download a missing file.
@@ -139,11 +145,15 @@ class AlbumArtContentProvider : ContentProvider() {
             latch!!.await(15, TimeUnit.SECONDS)
             // The download this thread was waiting on may have failed (or timed out), in which
             // case there is genuinely no art available for this item.
-            return if (file.exists()) {
-                Log.d(LOG_MARKER, "... Available!")
-                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-            } else {
-                Log.d(LOG_MARKER, "... Not available.")
+            return try {
+                if (file.exists()) {
+                    Log.d(LOG_MARKER, "... Available!")
+                    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                } else {
+                    Log.d(LOG_MARKER, "... Not available.")
+                    null
+                }
+            } catch (e: FileNotFoundException) {
                 null
             }
         }
@@ -195,9 +205,13 @@ class AlbumArtContentProvider : ContentProvider() {
             trimArtCache(artDir)
         }
 
-        return if (success) {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-        } else {
+        return try {
+            if (success) {
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            } else {
+                null
+            }
+        } catch (e: FileNotFoundException) {
             null
         }
     }

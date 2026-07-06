@@ -39,6 +39,7 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
     // Guards against a second polling loop being started (e.g. navigating back to the server
     // fragment and forward again) that would clobber quickConnectSecret and double-poll.
     private var quickConnectJob: Job? = null
+    private var quickConnectServer: String? = null
 
     private val _loggedIn = MutableLiveData<Boolean>()
     val loggedIn: LiveData<Boolean> = _loggedIn
@@ -63,10 +64,15 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
     }
 
     fun startQuickConnect(serverUrl: String) {
-        // Don't start a second concurrent loop; the existing one is still polling.
-        if (quickConnectJob?.isActive == true) {
+        // Already polling this exact server (e.g. the fragment was just recreated): keep the
+        // existing loop and its displayed code, don't spawn a second one. But a DIFFERENT server
+        // (the user went back and chose another) — or a loop that already finished/failed — must
+        // restart, otherwise we'd keep polling and showing the old server's code.
+        if (quickConnectJob?.isActive == true && quickConnectServer == serverUrl) {
             return
         }
+        quickConnectJob?.cancel()
+        quickConnectServer = serverUrl
 
         Log.i(LOG_MARKER, "Initiate QuickConnect")
         val api = jellyfin.createApi(serverUrl)
