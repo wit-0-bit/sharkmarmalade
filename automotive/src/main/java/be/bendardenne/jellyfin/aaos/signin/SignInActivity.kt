@@ -9,9 +9,11 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
+import android.util.Log
 import be.bendardenne.jellyfin.aaos.JellyfinMediaLibrarySessionCallback.Companion.LOGIN_COMMAND
 import be.bendardenne.jellyfin.aaos.JellyfinMusicService
 import be.bendardenne.jellyfin.aaos.R
+import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 
@@ -36,9 +38,24 @@ class SignInActivity : AppCompatActivity() {
                 ).buildAsync()
 
                 lifecycleScope.launch {
-                    val controller = future.await()
-                    controller.sendCustomCommand(SessionCommand(LOGIN_COMMAND, Bundle()), Bundle())
-                    finish()
+                    try {
+                        val controller = future.await()
+                        try {
+                            controller.sendCustomCommand(
+                                SessionCommand(LOGIN_COMMAND, Bundle()),
+                                Bundle()
+                            )
+                        } finally {
+                            // Release the controller so we don't leak a live session
+                            // connection for the rest of the process.
+                            controller.release()
+                        }
+                    } catch (e: Exception) {
+                        // The account is already stored; the service picks it up on next start.
+                        Log.e(LOG_MARKER, "Failed to notify service of login", e)
+                    } finally {
+                        finish()
+                    }
                 }
 
             }

@@ -55,12 +55,12 @@ class UsernamePasswordSignInFragment : Fragment() {
             quickConnectProgressBar.visibility = View.GONE
             quickConnectCode.visibility = View.VISIBLE
 
-            if (value == -1) {
-                quickConnectCode.text = context?.getText(R.string.unavailable)
+            quickConnectCode.text = if (value == null) {
+                context?.getText(R.string.unavailable)
             } else {
-                val code = value.toString()
-                val formattedCode = code.take(3) + " " + code.substring(3)
-                quickConnectCode.text = formattedCode
+                // Codes are 6 digits; show them grouped as "123 456". Guard the split so an
+                // unexpected length can never crash.
+                if (value.length == 6) value.substring(0, 3) + " " + value.substring(3) else value
             }
         }
 

@@ -9,11 +9,13 @@ import be.bendardenne.jellyfin.aaos.JellyfinAccountManager
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jellyfin.sdk.Jellyfin
+import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
 import org.jellyfin.sdk.api.client.extensions.quickConnectApi
 import org.jellyfin.sdk.api.client.extensions.systemApi
@@ -33,11 +35,16 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
 
     private var quickConnectSecret: String = ""
 
+    // Guards against a second polling loop being started (e.g. navigating back to the server
+    // fragment and forward again) that would clobber quickConnectSecret and double-poll.
+    private var quickConnectJob: Job? = null
+
     private val _loggedIn = MutableLiveData<Boolean>()
     val loggedIn: LiveData<Boolean> = _loggedIn
 
-    private val _quickConnectCode = MutableLiveData<Int>()
-    val quickConnectCode: LiveData<Int> = _quickConnectCode
+    // null means QuickConnect is unavailable (disabled server-side or an error occurred).
+    private val _quickConnectCode = MutableLiveData<String?>()
+    val quickConnectCode: LiveData<String?> = _quickConnectCode
 
     suspend fun pingServer(serverUrl: String): Boolean {
         return try {
@@ -55,61 +62,78 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
     }
 
     fun startQuickConnect(serverUrl: String) {
+        // Don't start a second concurrent loop; the existing one is still polling.
+        if (quickConnectJob?.isActive == true) {
+            return
+        }
+
         Log.i(LOG_MARKER, "Initiate QuickConnect")
         val api = jellyfin.createApi(serverUrl)
 
-        viewModelScope.launch {
-            val isEnabled = withContext(Dispatchers.IO) {
-                api.quickConnectApi.getQuickConnectEnabled()
-            }
+        quickConnectJob = viewModelScope.launch {
+            try {
+                val isEnabled = withContext(Dispatchers.IO) {
+                    api.quickConnectApi.getQuickConnectEnabled()
+                }
 
-            if (isEnabled.status != 200 || !isEnabled.content) {
-                _quickConnectCode.value = -1
-                return@launch
-            }
+                if (!isEnabled.content) {
+                    _quickConnectCode.value = null
+                    return@launch
+                }
 
-            val response = withContext(Dispatchers.IO) {
-                api.quickConnectApi.initiateQuickConnect()
-            }
+                val response = withContext(Dispatchers.IO) {
+                    api.quickConnectApi.initiateQuickConnect()
+                }
 
-            if (response.status == 200) {
                 quickConnectSecret = response.content.secret
                 Log.d(LOG_MARKER, "QuickConnect initiated")
-                _quickConnectCode.value = Integer.valueOf(response.content.code)
+                // The SDK models the code as a String; keep it one end to end.
+                _quickConnectCode.value = response.content.code
 
-                do {
+                while (isActive) {
                     delay(1.seconds)
-                    checkQuickConnect(serverUrl)
-                } while (isActive)
+                    try {
+                        // Break the loop once authenticated so we don't re-authenticate every
+                        // second forever after the user approves.
+                        if (pollQuickConnect(api, serverUrl)) {
+                            break
+                        }
+                    } catch (e: Exception) {
+                        // A transient network blip (or a code that has expired) must not crash
+                        // the sign-in screen. Keep polling; a real expiry just never succeeds
+                        // until the user retries.
+                        Log.w(LOG_MARKER, "QuickConnect poll failed, will retry", e)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(LOG_MARKER, "QuickConnect unavailable", e)
+                _quickConnectCode.value = null
             }
         }
     }
 
-    private suspend fun checkQuickConnect(server: String) {
-        val api = jellyfin.createApi(server)
+    /** Returns true once QuickConnect has been approved and the account is stored. */
+    private suspend fun pollQuickConnect(api: ApiClient, server: String): Boolean {
         val response = withContext(Dispatchers.IO) {
             api.quickConnectApi.getQuickConnectState(quickConnectSecret)
         }
 
         Log.d(LOG_MARKER, "Checking QuickConnect")
 
-        if (response.status == 200) {
-            if (!response.content.authenticated) {
-                return
-            }
-
-            val loginResponse = withContext(Dispatchers.IO) {
-                api.userApi.authenticateWithQuickConnect(QuickConnectDto(response.content.secret))
-            }
-
-            if (loginResponse.status == 200) {
-                loginSuccess(
-                    server,
-                    loginResponse.content.user?.name!!,
-                    loginResponse.content.accessToken!!
-                )
-            }
+        if (!response.content.authenticated) {
+            return false
         }
+
+        val loginResponse = withContext(Dispatchers.IO) {
+            api.userApi.authenticateWithQuickConnect(QuickConnectDto(quickConnectSecret))
+        }
+
+        loginSuccess(
+            server,
+            loginResponse.content.user?.name!!,
+            loginResponse.content.accessToken!!
+        )
+        return true
     }
 
     suspend fun login(server: String, username: String, password: String): Boolean {
