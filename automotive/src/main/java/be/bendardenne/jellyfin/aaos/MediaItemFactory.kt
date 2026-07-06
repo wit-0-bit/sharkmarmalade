@@ -8,6 +8,7 @@ import androidx.core.net.toUri
 import androidx.media3.common.HeartRating
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaConstants
 import androidx.preference.PreferenceManager
@@ -23,6 +24,7 @@ import org.jellyfin.sdk.model.UUID
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
+import org.jellyfin.sdk.model.api.MediaStreamProtocol
 
 @OptIn(UnstableApi::class)
 class MediaItemFactory(
@@ -38,6 +40,10 @@ class MediaItemFactory(
         const val FAVOURITES = "FAVOURITES_ID"
         const val PLAYLISTS = "PLAYLISTS_ID"
         const val PARENT_KEY = "PARENT_KEY"
+
+        // Transcode target when no bitrate preference is set. FDK-AAC is transparent well below
+        // this.
+        const val TRANSCODE_BITRATE = 256_000
     }
 
     fun rootNode(): MediaItem {
@@ -235,17 +241,22 @@ class MediaItemFactory(
         //  /Items endpoint, which does not include the codec (mediaSources/mediaStreams) in its
         //  response.
 
-        // When a file is not in this list of containers, it will always be transcoded.
-        // This list are containers that I tested.
-        val allowedContainers = listOf("flac", "mp3", "m4a", "aac", "ogg")
+        // Everything transcodes to AAC 256 over HLS: one consistent delivered format, ~18x
+        // smaller than hi-res FLAC, and — unlike a plain transcoded HTTP stream, which is an
+        // unseekable chunked pipe that makes hosts hide the seek bar — HLS is seekable, with the
+        // server transcoding from the seek point on demand. "ts" matches no music container, so
+        // nothing ever direct-plays. The server's ffmpeg has libfdk_aac (verified), which
+        // Jellyfin prefers automatically over ffmpeg's mediocre native AAC encoder.
+        val allowedContainers = listOf("ts")
         val audioStream =
             jellyfinApi.universalAudioApi.getUniversalAudioStreamUrl(
                 item.id,
                 container = allowedContainers,
-                audioBitRate = bitrate,
+                audioBitRate = bitrate ?: TRANSCODE_BITRATE,
                 maxStreamingBitrate = bitrate,
-                transcodingContainer = "mp3",
-                audioCodec = "mp3",
+                transcodingContainer = "ts",
+                transcodingProtocol = MediaStreamProtocol.HLS,
+                audioCodec = "aac",
             )
 
         val extras = Bundle()
@@ -273,6 +284,9 @@ class MediaItemFactory(
             .setMediaId(item.id.toString())
             .setMediaMetadata(metadata)
             .setUri(audioStream)
+            // The universal URL gives no hint that the response is an HLS playlist; without an
+            // explicit MIME type, ExoPlayer would try to parse it as progressive media.
+            .setMimeType(MimeTypes.APPLICATION_M3U8)
             .build()
     }
 

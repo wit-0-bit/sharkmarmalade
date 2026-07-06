@@ -56,6 +56,8 @@ dependencies {
     implementation("androidx.databinding:databinding-runtime:9.1.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
     implementation("androidx.media3:media3-exoplayer:1.9.2")
+    // HLS is used for transcoded audio streams: unlike plain HTTP transcodes, HLS is seekable.
+    implementation("androidx.media3:media3-exoplayer-hls:1.9.2")
     implementation("androidx.media3:media3-session:1.9.2")
     implementation("androidx.media3:media3-ui:1.9.2")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
