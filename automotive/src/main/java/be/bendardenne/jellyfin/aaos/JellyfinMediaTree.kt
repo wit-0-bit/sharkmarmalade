@@ -3,11 +3,19 @@ package be.bendardenne.jellyfin.aaos
 import android.content.Context
 import android.util.Log
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata.MEDIA_TYPE_ALBUM
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_ARTIST
+import androidx.media3.common.MediaMetadata.MEDIA_TYPE_GENRE
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_PLAYLIST
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ALBUMS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ARTISTS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.BROWSE
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.BROWSE_ARTISTS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.FAVOURITES
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.GENRES
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.LATEST_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAYLISTS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAY_ALL_PREFIX
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.RANDOM_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
@@ -20,6 +28,7 @@ import kotlinx.coroutines.launch
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.artistsApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
+import org.jellyfin.sdk.api.client.extensions.musicGenresApi
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
 import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
@@ -60,7 +69,16 @@ class JellyfinMediaTree(
                 RANDOM_ALBUMS -> itemFactory.randomAlbums()
                 FAVOURITES -> itemFactory.favourites()
                 PLAYLISTS -> itemFactory.playlists()
-                else -> {
+                ARTISTS -> itemFactory.artists()
+                BROWSE -> itemFactory.browse()
+                BROWSE_ARTISTS -> itemFactory.browseArtists()
+                GENRES -> itemFactory.genres()
+                ALBUMS -> itemFactory.albums()
+                else -> if (id.startsWith(PLAY_ALL_PREFIX)) {
+                    val parentId = id.removePrefix(PLAY_ALL_PREFIX)
+                    val isArtist = getItem(parentId).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST
+                    itemFactory.playAllRow(parentId, isArtist)
+                } else {
                     // Stream URLs / art URIs are rebuilt by the factory on every create().
                     val cached = diskCache.readItem(id)
                     val dto = cached
@@ -83,9 +101,17 @@ class JellyfinMediaTree(
     suspend fun getChildren(id: String): List<MediaItem> {
         return when (id) {
             ROOT_ID -> listOf(
-                getItem(LATEST_ALBUMS),
                 getItem(RANDOM_ALBUMS),
+                getItem(ARTISTS),
                 getItem(FAVOURITES),
+                getItem(BROWSE)
+            )
+
+            BROWSE -> listOf(
+                getItem(BROWSE_ARTISTS),
+                getItem(GENRES),
+                getItem(ALBUMS),
+                getItem(LATEST_ALBUMS),
                 getItem(PLAYLISTS)
             )
 
@@ -93,6 +119,12 @@ class JellyfinMediaTree(
             RANDOM_ALBUMS -> getRandomAlbums()
             FAVOURITES -> childrenWithCache(id, ::fetchFavourites, ::buildFavouriteItems)
             PLAYLISTS -> childrenWithCache(id, ::fetchPlaylists, ::buildItems)
+            // Same data, but each keyed by the browsed parent id so revalidation notifies the
+            // right subscription.
+            ARTISTS -> childrenWithCache(id, ::fetchArtists, ::buildItems)
+            BROWSE_ARTISTS -> childrenWithCache(id, ::fetchArtists, ::buildItems)
+            GENRES -> childrenWithCache(id, ::fetchGenres, ::buildItems)
+            ALBUMS -> childrenWithCache(id, ::fetchAlbums, ::buildItems)
             else -> getItemChildren(id)
         }
     }
@@ -258,8 +290,16 @@ class JellyfinMediaTree(
     }
 
     private suspend fun getItemChildren(id: String): List<MediaItem> {
-        if (getItem(id).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST) {
-            return childrenWithCache(id, { fetchArtistAlbums(id) }, ::buildItems)
+        val mediaType = getItem(id).mediaMetadata.mediaType
+
+        if (mediaType == MEDIA_TYPE_ARTIST) {
+            return childrenWithCache(id, { fetchArtistAlbums(id) }) {
+                withPlayAll(id, isArtist = true, buildItems(it))
+            }
+        }
+
+        if (mediaType == MEDIA_TYPE_GENRE) {
+            return childrenWithCache(id, { fetchGenreAlbums(id) }, ::buildItems)
         }
 
         var sortBy = listOf(
@@ -269,13 +309,35 @@ class JellyfinMediaTree(
         );
 
         // For playlists, we should respect the default order (user's track order)
-        if (getItem(id).mediaMetadata.mediaType == MEDIA_TYPE_PLAYLIST) {
+        if (mediaType == MEDIA_TYPE_PLAYLIST) {
             sortBy = listOf(ItemSortBy.DEFAULT)
         }
 
-        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) { buildChildItems(id, it) }
+        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) {
+            val children = buildChildItems(id, it)
+            if (mediaType == MEDIA_TYPE_ALBUM) {
+                withPlayAll(id, isArtist = false, children)
+            } else {
+                children
+            }
+        }
     }
 
+    /**
+     * Prepends the synthetic "Play All" row. Only ever added by builders, never persisted: the
+     * disk cache must contain real DTOs only.
+     */
+    private fun withPlayAll(
+        parentId: String,
+        isArtist: Boolean,
+        children: List<MediaItem>
+    ): List<MediaItem> {
+        val playAll = itemFactory.playAllRow(parentId, isArtist)
+        mediaItems.put(playAll.mediaId, playAll)
+        return listOf(playAll) + children
+    }
+
+    // No limit: these children are queued for playback, so truncating them changes what plays.
     private suspend fun fetchItemChildren(id: String, sortBy: List<ItemSortBy>): List<BaseItemDto> {
         return api.itemsApi.getItems(
             sortBy = sortBy,
@@ -293,6 +355,38 @@ class JellyfinMediaTree(
             recursive = true,
             includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
             albumArtistIds = listOf(id.toUUID()),
+            limit = maxItemsPerPage
+        ).content.items
+    }
+
+    private suspend fun fetchGenreAlbums(id: String): List<BaseItemDto> {
+        return api.itemsApi.getItems(
+            sortBy = listOf(ItemSortBy.SORT_NAME),
+            recursive = true,
+            includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
+            genreIds = listOf(id.toUUID()),
+            limit = maxItemsPerPage
+        ).content.items
+    }
+
+    private suspend fun fetchArtists(): List<BaseItemDto> {
+        return api.artistsApi.getAlbumArtists(
+            limit = maxItemsPerPage
+        ).content.items
+    }
+
+    private suspend fun fetchGenres(): List<BaseItemDto> {
+        return api.musicGenresApi.getMusicGenres(
+            limit = maxItemsPerPage
+        ).content.items
+    }
+
+    private suspend fun fetchAlbums(): List<BaseItemDto> {
+        return api.itemsApi.getItems(
+            includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
+            recursive = true,
+            sortBy = listOf(ItemSortBy.SORT_NAME),
+            limit = maxItemsPerPage
         ).content.items
     }
 

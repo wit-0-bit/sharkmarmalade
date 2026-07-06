@@ -13,9 +13,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaConstants
 import androidx.preference.PreferenceManager
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.DIRECT_STREAM
-import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.EXPAND
-import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PLAY
-import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_ALBUM_BEHAVIOUR
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_BITRATE
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.universalAudioApi
@@ -39,6 +36,12 @@ class MediaItemFactory(
         const val RANDOM_ALBUMS = "RANDOM_ALBUMS_ID"
         const val FAVOURITES = "FAVOURITES_ID"
         const val PLAYLISTS = "PLAYLISTS_ID"
+        const val ARTISTS = "ARTISTS_ID"
+        const val BROWSE = "BROWSE_ID"
+        const val BROWSE_ARTISTS = "BROWSE_ARTISTS_ID"
+        const val GENRES = "GENRES_ID"
+        const val ALBUMS = "ALBUMS_ID"
+        const val PLAY_ALL_PREFIX = "PLAY_ALL:"
         const val PARENT_KEY = "PARENT_KEY"
 
         // Transcode target when no bitrate preference is set. FDK-AAC is transparent well below
@@ -61,11 +64,110 @@ class MediaItemFactory(
     }
 
     fun latestAlbums(): MediaItem {
-        return albumCategory(LATEST_ALBUMS, "Latest", "schedule")
+        return albumCategory(LATEST_ALBUMS, context.getString(R.string.recents), "schedule")
     }
 
     fun randomAlbums(): MediaItem {
         return albumCategory(RANDOM_ALBUMS, "Random", "casino")
+    }
+
+    fun albums(): MediaItem {
+        return albumCategory(ALBUMS, context.getString(R.string.albums), "album")
+    }
+
+    fun artists(): MediaItem {
+        return artistCategory(ARTISTS)
+    }
+
+    fun browseArtists(): MediaItem {
+        return artistCategory(BROWSE_ARTISTS)
+    }
+
+    private fun artistCategory(id: String): MediaItem {
+        val extras = Bundle()
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+        )
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+        )
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(context.getString(R.string.artists))
+            .setIsBrowsable(true)
+            .setIsPlayable(false)
+            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/artists".toUri())
+            .setExtras(extras)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS)
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(id)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    fun browse(): MediaItem {
+        val extras = Bundle()
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
+        )
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(context.getString(R.string.browse))
+            .setIsBrowsable(true)
+            .setIsPlayable(false)
+            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/browse".toUri())
+            .setExtras(extras)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(BROWSE)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    fun genres(): MediaItem {
+        val extras = Bundle()
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
+        )
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(context.getString(R.string.genres))
+            .setIsBrowsable(true)
+            .setIsPlayable(false)
+            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/genre".toUri())
+            .setExtras(extras)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_GENRES)
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(GENRES)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    fun playAllRow(parentId: String, isArtist: Boolean): MediaItem {
+        val label = if (isArtist) R.string.shuffle_all_songs else R.string.play_album
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(context.getString(label))
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/play_all".toUri())
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(PLAY_ALL_PREFIX + parentId)
+            .setMediaMetadata(metadata)
+            .build()
     }
 
 
@@ -176,17 +278,43 @@ class MediaItemFactory(
             extras.putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, group)
         }
 
-        val preferenceIsExpand = PreferenceManager
-            .getDefaultSharedPreferences(context)
-            .getString(PREF_ALBUM_BEHAVIOUR, PLAY) == EXPAND
-
         val metadata = MediaMetadata.Builder()
             .setTitle(item.name)
             .setAlbumArtist(item.albumArtist)
-            .setIsBrowsable(preferenceIsExpand)
-            .setIsPlayable(!preferenceIsExpand)
+            .setIsBrowsable(true)
+            .setIsPlayable(false)
             .setArtworkUri(artUri(item.id))
             .setMediaType(MediaMetadata.MEDIA_TYPE_ALBUM)
+            .setExtras(extras)
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(item.id.toString())
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    private fun forGenre(item: BaseItemDto, group: String? = null): MediaItem {
+        val extras = Bundle()
+        if (group != null) {
+            extras.putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, group)
+        }
+
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+        )
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+        )
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(item.name)
+            .setIsBrowsable(true)
+            .setIsPlayable(false)
+            .setArtworkUri(artUri(item.id))
+            .setMediaType(MediaMetadata.MEDIA_TYPE_GENRE)
             .setExtras(extras)
             .build()
 
@@ -310,6 +438,7 @@ class MediaItemFactory(
     ): MediaItem {
         return when (baseItemDto.type) {
             BaseItemKind.MUSIC_ARTIST -> forArtist(baseItemDto, group)
+            BaseItemKind.MUSIC_GENRE -> forGenre(baseItemDto, group)
             BaseItemKind.MUSIC_ALBUM -> forAlbum(baseItemDto, group)
             BaseItemKind.PLAYLIST -> forPlaylist(baseItemDto, group)
             BaseItemKind.AUDIO -> forTrack(baseItemDto, group, parent)

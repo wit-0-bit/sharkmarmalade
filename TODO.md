@@ -84,12 +84,10 @@ Lower priority: real but low-impact, speculative, or purely maintainability.
 
 ## Design decisions to make (not bugs)
 
-- [ ] Build the redesign as currently specced in `CLAUDE.md`: root = **Random / Artists / Favourites
-      / Browse** (4 tabs, same count as today); Browse = category picker (**Artist / Genre / Album /
-      Recents / Playlists**) for lower-priority destinations; Artist deliberately lives in both
-      places (fast direct tab + Browse category, same underlying `getArtists()`); `PREF_ALBUM_BEHAVIOUR`
-      removed outright (replaced by a pinned "▶ Play All" row, not a preference or a dual-flag tap
-      gesture).
+- [x] Build the redesign as currently specced in `CLAUDE.md` — **done** on the `browse-redesign`
+      branch (root = Random / Artists / Favourites / Browse; Browse = Artists / Genres / Albums /
+      Recents / Playlists; pinned "▶ Play All" rows; `PREF_ALBUM_BEHAVIOUR` removed with a one-time
+      orphaned-key purge). See the status callout in `CLAUDE.md` for accepted residuals.
 - [ ] Confirm Genre is actually wanted as a Browse category — suggested (and backed by real Jellyfin
       SDK support via `MusicGenresApi`), not explicitly requested like the others. `Year` was also
       suggested and backed by real SDK support (`YearsApi`) but didn't make the latest list — left
@@ -101,10 +99,10 @@ Lower priority: real but low-impact, speculative, or purely maintainability.
 - [ ] Fix (or at least prioritize) the `mediaItems` cache-clobbering bug in Known Issues before/
       alongside this redesign — its most concrete repro scenario (Favourites vs. Playlist
       `PARENT_KEY` collision) stays fully live now that both are back in the app.
-- [ ] Implement the pinned "▶ Play All" synthetic row (shuffle for Artist, in-order for Album) per
-      `CLAUDE.md`'s "Playback affordance" section — needs a recognizable synthetic `mediaId`
-      intercepted in `onSetMediaItems`/`onAddMediaItems` before the generic `PARENT_KEY` path, and
-      exclusion from `resolveMediaItems()`'s normal recursion.
+- [x] Implement the pinned "▶ Play All" synthetic row (shuffle for Artist, in-order for Album) —
+      done as part of the redesign (see above). Low-severity residuals worth a later pass:
+      shuffle-mode side effect on the add-to-queue path, sequential album gathering on first
+      shuffle-all tap, notify itemCount off-by-one for synthetic-row parents.
 - [ ] Add Google Assistant **App Actions** (`actions.intent.PLAY_MEDIA` via `shortcuts.xml`) so
       voice search works as "Hey Google, play X on Shark Marmalade" without any in-app navigation —
       confirmed absent today (no `shortcuts.xml`/`actions.xml` anywhere in the project).

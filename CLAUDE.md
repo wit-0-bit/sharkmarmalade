@@ -207,6 +207,17 @@ which errored out once and was re-run) directly by whoever wrote this doc.
 
 ## Recommended direction: Artists → Albums → Songs drilldown
 
+> **Status (2026-07-05): IMPLEMENTED** on the `browse-redesign` branch (built, adversarially
+> verified, installed to the emulator). The section below is the spec it was built from. Known
+> accepted residuals from verification: `resolvePlayAll` also flips shuffle mode on the
+> add-to-queue (`onAddMediaItems`) path; the revalidation `notifyChildrenChanged` itemCount is
+> one lower than what browse returns for parents with a synthetic row (hint-only, harmless);
+> shuffle-all gathers albums sequentially (slow first tap on huge artists, disk-cached after);
+> a host-passed mixed list containing a Play All row would have its startIndex shift by one when
+> the row is filtered. Note: the `limit` originally added to `fetchItemChildren` was removed
+> during verification — capping an album/playlist's *playback* fetch at 120 silently truncates
+> queues, which is worse than the unbounded fetch; real pagination remains the follow-up.
+
 The app owner wants a more traditional Artists → Albums → Songs curation/drilldown. This section
 started from a 3-proposal judged comparison (see git history of this file for that fuller
 analysis) and has since been narrowed down across several rounds of direct feedback from the app

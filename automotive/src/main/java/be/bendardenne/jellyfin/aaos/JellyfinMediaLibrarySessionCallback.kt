@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.annotation.OptIn
 import androidx.concurrent.futures.SuspendToFutureAdapter
 import androidx.core.content.edit
+import androidx.media3.common.C
 import androidx.media3.common.HeartRating
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -29,9 +30,9 @@ import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import androidx.preference.PreferenceManager
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PARENT_KEY
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAY_ALL_PREFIX
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
-import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_ALBUM_BEHAVIOUR
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_BITRATE
 import be.bendardenne.jellyfin.aaos.signin.SignInActivity
 import com.google.common.collect.ImmutableList
@@ -72,7 +73,7 @@ class JellyfinMediaLibrarySessionCallback(
     // Listener must be kept in a field to prevent GC (weak referenced by SharedPref.)
     private val prefListener: SharedPreferences.OnSharedPreferenceChangeListener =
         SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
-            if (key == PREF_ALBUM_BEHAVIOUR || key == PREF_BITRATE) {
+            if (key == PREF_BITRATE) {
                 Log.i(LOG_MARKER, "Preferences invalidated")
 
                 if (!::tree.isInitialized) {
@@ -239,7 +240,13 @@ class JellyfinMediaLibrarySessionCallback(
         mediaItems: List<MediaItem>,
     ): ListenableFuture<List<MediaItem>> {
         Log.i(LOG_MARKER, "onAddMediaItems $mediaItems")
-        return SuspendToFutureAdapter.launchFuture { resolveMediaItems(mediaItems) }
+        return SuspendToFutureAdapter.launchFuture {
+            if (isPlayAll(mediaItems)) {
+                resolvePlayAll(mediaSession, mediaItems[0].mediaId)
+            } else {
+                resolveMediaItems(mediaItems)
+            }
+        }
     }
 
     override fun onSetMediaItems(
@@ -251,6 +258,27 @@ class JellyfinMediaLibrarySessionCallback(
     ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
         Log.i(LOG_MARKER, "onSetMediaItems $mediaItems")
         return SuspendToFutureAdapter.launchFuture {
+            if (isPlayAll(mediaItems)) {
+                val resolvedItems = resolvePlayAll(mediaSession, mediaItems[0].mediaId)
+                savePlaylist(resolvedItems)
+                // For the shuffled (artist) flavour, an explicit start index would override
+                // shuffle order: INDEX_UNSET lets the player start at the shuffle order's first
+                // item instead of always the first track of the first album.
+                return@launchFuture if (mediaSession.player.shuffleModeEnabled) {
+                    MediaSession.MediaItemsWithStartPosition(
+                        resolvedItems,
+                        C.INDEX_UNSET,
+                        C.TIME_UNSET
+                    )
+                } else {
+                    MediaSession.MediaItemsWithStartPosition(
+                        resolvedItems,
+                        0,
+                        startPositionMs
+                    )
+                }
+            }
+
             if (isSingleItemWithParent(mediaItems)) {
                 val singleItem = mediaItems[0]
                 val resolvedItems = expandSingleItem(singleItem)
@@ -287,6 +315,36 @@ class JellyfinMediaLibrarySessionCallback(
         }
     }
 
+    private fun isPlayAll(mediaItems: List<MediaItem>): Boolean {
+        return mediaItems.size == 1 && mediaItems[0].mediaId.startsWith(PLAY_ALL_PREFIX)
+    }
+
+    /**
+     * Resolves a synthetic "Play All" row to its parent's real playable tracks: everything by an
+     * artist (shuffled), or an album in track order.
+     */
+    private suspend fun resolvePlayAll(session: MediaSession, mediaId: String): List<MediaItem> {
+        val parentId = mediaId.removePrefix(PLAY_ALL_PREFIX)
+        val isArtist =
+            tree.getItem(parentId).mediaMetadata.mediaType == MediaMetadata.MEDIA_TYPE_ARTIST
+
+        session.player.shuffleModeEnabled = isArtist
+        session.setMediaButtonPreferences(CommandButtons.createButtons(session.player))
+
+        val children = realChildren(parentId)
+        return if (isArtist) {
+            children.flatMap { album ->
+                realChildren(album.mediaId).filter { it.mediaMetadata.isPlayable == true }
+            }
+        } else {
+            children.filter { it.mediaMetadata.isPlayable == true }
+        }
+    }
+
+    private suspend fun realChildren(parentId: String): List<MediaItem> {
+        return tree.getChildren(parentId).filterNot { it.mediaId.startsWith(PLAY_ALL_PREFIX) }
+    }
+
     private suspend fun isSingleItemWithParent(mediaItems: List<MediaItem>): Boolean {
         return mediaItems.size == 1 &&
                 tree.getItem(mediaItems[0].mediaId).mediaMetadata.extras?.containsKey(PARENT_KEY) == true
@@ -306,6 +364,10 @@ class JellyfinMediaLibrarySessionCallback(
         val playlist = mutableListOf<MediaItem>()
 
         mediaItems.forEach {
+            // Pinned "Play All" rows are intercepted upstream; never queue one as a track.
+            if (it.mediaId.startsWith(PLAY_ALL_PREFIX)) {
+                return@forEach
+            }
             // We need to call getItem to resolve the full item: the provided MediaItem only has an ID.
             val item = tree.getItem(it.mediaId)
             // If the item is an album or playlist, get its children and add them to the playlist.
