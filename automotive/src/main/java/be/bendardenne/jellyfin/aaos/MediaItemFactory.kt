@@ -98,7 +98,7 @@ class MediaItemFactory(
             .setTitle(context.getString(R.string.artists))
             .setIsBrowsable(true)
             .setIsPlayable(false)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/artists".toUri())
+            .setArtworkUri(drawableUri("artists"))
             .setExtras(extras)
             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS)
             .build()
@@ -120,7 +120,7 @@ class MediaItemFactory(
             .setTitle(context.getString(R.string.browse))
             .setIsBrowsable(true)
             .setIsPlayable(false)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/browse".toUri())
+            .setArtworkUri(drawableUri("browse"))
             .setExtras(extras)
             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
             .build()
@@ -142,7 +142,7 @@ class MediaItemFactory(
             .setTitle(context.getString(R.string.genres))
             .setIsBrowsable(true)
             .setIsPlayable(false)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/genre".toUri())
+            .setArtworkUri(drawableUri("genre"))
             .setExtras(extras)
             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_GENRES)
             .build()
@@ -160,7 +160,7 @@ class MediaItemFactory(
             .setTitle(context.getString(label))
             .setIsBrowsable(false)
             .setIsPlayable(true)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/play_all".toUri())
+            .setArtworkUri(drawableUri("play_all"))
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .build()
 
@@ -186,7 +186,7 @@ class MediaItemFactory(
             .setTitle(label)
             .setIsBrowsable(true)
             .setIsPlayable(false)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/$icon".toUri())
+            .setArtworkUri(drawableUri(icon))
             .setExtras(extras)
             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS)
             .build()
@@ -208,7 +208,7 @@ class MediaItemFactory(
             .setTitle("Favourites")
             .setIsBrowsable(true)
             .setIsPlayable(false)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/star_filled".toUri())
+            .setArtworkUri(drawableUri("star_filled"))
             .setExtras(extras)
             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
             .build()
@@ -230,7 +230,7 @@ class MediaItemFactory(
             .setTitle("Playlists")
             .setIsBrowsable(true)
             .setIsPlayable(false)
-            .setArtworkUri("android.resource://be.bendardenne.jellyfin.aaos/drawable/playlists".toUri())
+            .setArtworkUri(drawableUri("playlists"))
             .setExtras(extras)
             .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS)
             .build()
@@ -417,6 +417,11 @@ class MediaItemFactory(
             .setMimeType(MimeTypes.APPLICATION_M3U8)
             .build()
     }
+
+    // The package in an android.resource:// URI must be the installed package (applicationId),
+    // which deliberately differs from this code's namespace.
+    private fun drawableUri(name: String): Uri =
+        "android.resource://${context.packageName}/drawable/$name".toUri()
 
     private fun artUri(id: UUID): Uri {
         val artUrl = ImageApi(jellyfinApi).getItemImageUrl(

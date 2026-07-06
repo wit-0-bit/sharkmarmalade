@@ -7,12 +7,14 @@ import android.accounts.AccountManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import be.bendardenne.jellyfin.aaos.BuildConfig
 import be.bendardenne.jellyfin.aaos.signin.SignInActivity
 
 class Authenticator(val context: Context) : AbstractAccountAuthenticator(context) {
     companion object {
-        const val ACCOUNT_TYPE = "be.bendardenne.jellyfin.aaos"
-        const val AUTHTOKEN_TYPE = "be.bendardenne.jellyfin.aaos"
+        // Must match the applicationId-derived account_type resource used in authenticator.xml.
+        const val ACCOUNT_TYPE = BuildConfig.APPLICATION_ID
+        const val AUTHTOKEN_TYPE = BuildConfig.APPLICATION_ID
     }
 
     override fun editProperties(p0: AccountAuthenticatorResponse?, p1: String?): Bundle =

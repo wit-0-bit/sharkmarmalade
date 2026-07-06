@@ -87,7 +87,7 @@
 
         <provider
             android:name=".AlbumArtContentProvider"
-            android:authorities="be.bendardenne.jellyfin.aaos"
+            android:authorities="${applicationId}"
             android:exported="true" />
 
     </application>

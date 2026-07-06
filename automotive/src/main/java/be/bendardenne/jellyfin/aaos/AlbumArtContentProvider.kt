@@ -44,7 +44,7 @@ class AlbumArtContentProvider : ContentProvider() {
             val path = uri.encodedPath?.substring(1)?.replace('/', ':') ?: return Uri.EMPTY
             val contentUri = Uri.Builder()
                 .scheme(ContentResolver.SCHEME_CONTENT)
-                .authority("be.bendardenne.jellyfin.aaos")
+                .authority(BuildConfig.APPLICATION_ID)
                 .path(path)
                 .build()
             synchronized(uriMap) {

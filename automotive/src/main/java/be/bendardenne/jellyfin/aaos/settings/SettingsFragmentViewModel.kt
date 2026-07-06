@@ -27,7 +27,7 @@ class SettingsFragmentViewModel
     val logUploadStatus = MutableLiveData<String>()
 
     fun versionString(): CharSequence =
-        "SharkMarmalade: ${jellyfin.clientInfo?.version}, Jellyfin API: ${Jellyfin.apiVersion}"
+        "Dorsal: ${jellyfin.clientInfo?.version}, Jellyfin API: ${Jellyfin.apiVersion}"
 
     fun sendLogs() {
         viewModelScope.launch {
