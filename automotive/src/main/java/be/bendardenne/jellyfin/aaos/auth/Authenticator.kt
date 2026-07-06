@@ -14,7 +14,10 @@ class Authenticator(val context: Context) : AbstractAccountAuthenticator(context
     companion object {
         // Must match the applicationId-derived account_type resource used in authenticator.xml.
         const val ACCOUNT_TYPE = BuildConfig.APPLICATION_ID
-        const val AUTHTOKEN_TYPE = BuildConfig.APPLICATION_ID
+
+        // Must match JellyfinAccountManager.TOKEN_TYPE, which is where the real token is stored
+        // (via setAuthToken) and read (via peekAuthToken).
+        const val AUTHTOKEN_TYPE = "$ACCOUNT_TYPE.access_token"
     }
 
     override fun editProperties(p0: AccountAuthenticatorResponse?, p1: String?): Bundle =
@@ -27,7 +30,11 @@ class Authenticator(val context: Context) : AbstractAccountAuthenticator(context
         requiredFeatures: Array<out String>?,
         options: Bundle?
     ): Bundle {
-        return Bundle()
+        // Contract: hand back an intent to collect credentials. Launch sign-in so "Add account"
+        // from system Settings actually does something instead of silently no-op'ing.
+        val intent = Intent(context, SignInActivity::class.java)
+        intent.putExtra(AccountManager.KEY_ACCOUNT_AUTHENTICATOR_RESPONSE, response)
+        return Bundle().apply { putParcelable(AccountManager.KEY_INTENT, intent) }
     }
 
     override fun confirmCredentials(
@@ -54,18 +61,19 @@ class Authenticator(val context: Context) : AbstractAccountAuthenticator(context
             return res
         }
 
-        // password is the auth token
+        // The real token is stored via setAuthToken (the password field is always blank), so read
+        // it back with peekAuthToken rather than returning the empty password.
         val accountManager = AccountManager.get(context)
-        val password = accountManager.getPassword(account)
-        if (password != null) {
+        val token = accountManager.peekAuthToken(account, authTokenType)
+        if (token != null) {
             val res = Bundle()
             res.putString(AccountManager.KEY_ACCOUNT_NAME, account.name)
             res.putString(AccountManager.KEY_ACCOUNT_TYPE, ACCOUNT_TYPE)
-            res.putString(AccountManager.KEY_AUTHTOKEN, password)
+            res.putString(AccountManager.KEY_AUTHTOKEN, token)
             return res
         }
 
-        // invalid password, ask for sign-in
+        // no stored token, ask for sign-in
         val intent = Intent(context, SignInActivity::class.java)
         intent.putExtra(AccountManager.KEY_ACCOUNT_AUTHENTICATOR_RESPONSE, response)
         val bundle = Bundle()
