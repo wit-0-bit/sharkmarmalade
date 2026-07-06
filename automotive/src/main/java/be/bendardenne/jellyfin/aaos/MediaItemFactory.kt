@@ -12,7 +12,6 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaConstants
 import androidx.preference.PreferenceManager
-import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.DIRECT_STREAM
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_BITRATE
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.universalAudioApi
@@ -355,11 +354,12 @@ class MediaItemFactory(
         // tracks within the same album, which seems weird.
         val artUrl = artUri(item.albumId ?: item.id)
 
-        val preferenceBitrate = PreferenceManager
+        // Unset, or any non-numeric legacy value (e.g. an old "Direct stream" that predates the
+        // always-transcode switch), falls back to the default transcode bitrate.
+        val bitrate = PreferenceManager
             .getDefaultSharedPreferences(context)
-            .getString(PREF_BITRATE, DIRECT_STREAM)!!
-
-        val bitrate = if (preferenceBitrate == DIRECT_STREAM) null else preferenceBitrate.toInt()
+            .getString(PREF_BITRATE, null)
+            ?.toIntOrNull()
 
         // Nice-to-have: it would be nice to force transcoding when the codec is not supported
         //  (eg ALAC).

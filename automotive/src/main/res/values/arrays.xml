@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Everything is transcoded to AAC over HLS (see MediaItemFactory.forTrack); this only sets
+         the target bitrate. There is deliberately no "direct stream" entry — it produced a
+         byte-identical 256k transcode, so it was a mislabelled duplicate of "256 kbps (AAC)". -->
     <string-array name="bitrate">
-        <item>Direct stream</item>
-        <item>320 kbps</item>
-        <item>256 kbps</item>
-        <item>192 kbps</item>
-        <item>160 kbps</item>
-        <item>128 kbps</item>
+        <item>320 kbps (AAC)</item>
+        <item>256 kbps (AAC)</item>
+        <item>192 kbps (AAC)</item>
+        <item>160 kbps (AAC)</item>
+        <item>128 kbps (AAC)</item>
     </string-array>
 
     <string-array name="bitrateValues">
-        <item>Direct stream</item>
         <item>320000</item>
         <item>256000</item>
         <item>192000</item>

@@ -6,7 +6,7 @@
             android:key="bitrate"
             android:entries="@array/bitrate"
             android:entryValues="@array/bitrateValues"
-            android:defaultValue="Direct stream"
+            android:defaultValue="256000"
             android:summary="%s"
             android:title="@string/max_bitrate" />
 
