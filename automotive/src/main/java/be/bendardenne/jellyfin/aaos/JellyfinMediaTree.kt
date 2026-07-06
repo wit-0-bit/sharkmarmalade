@@ -6,6 +6,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_ALBUM
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_ARTIST
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_GENRE
+import androidx.media3.common.MediaMetadata.MEDIA_TYPE_MUSIC
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_PLAYLIST
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ARTISTS
@@ -18,6 +19,7 @@ import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAYLISTS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAY_ALL_PREFIX
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.RANDOM_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.SINGLE_PREFIX
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
@@ -91,21 +93,32 @@ class JellyfinMediaTree(
             BROWSE_ARTISTS -> itemFactory.browseArtists()
             GENRES -> itemFactory.genres()
             ALBUMS -> itemFactory.albums()
-            else -> if (id.startsWith(PLAY_ALL_PREFIX)) {
-                val parentId = id.removePrefix(PLAY_ALL_PREFIX)
-                val isArtist = getItem(parentId).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST
-                itemFactory.playAllRow(parentId, isArtist)
-            } else {
-                // Stream URLs / art URIs are rebuilt by the factory on every create().
-                val cached = diskCache.readItem(id)
-                val dto = cached
-                    ?: api.userLibraryApi.getItem(id.toUUID()).content.also {
-                        revalidationScope.launch { diskCache.writeItem(it) }
-                    }
-                if (cached != null) {
-                    revalidateItem(id)
+            else -> when {
+                id.startsWith(PLAY_ALL_PREFIX) -> {
+                    val parentId = id.removePrefix(PLAY_ALL_PREFIX)
+                    val isArtist = getItem(parentId).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST
+                    itemFactory.playAllRow(parentId, isArtist)
                 }
-                itemFactory.create(dto)
+
+                // A SINGLE row: build the underlying track (from disk/network via the raw id) and
+                // re-apply the tag so the tap path still recognises it as play-alone. The rebuilt
+                // item carries a PARENT_KEY extra, but the callback short-circuits on the prefix
+                // before ever reading it, so it stays inert.
+                id.startsWith(SINGLE_PREFIX) ->
+                    getItem(id.removePrefix(SINGLE_PREFIX)).buildUpon().setMediaId(id).build()
+
+                else -> {
+                    // Stream URLs / art URIs are rebuilt by the factory on every create().
+                    val cached = diskCache.readItem(id)
+                    val dto = cached
+                        ?: api.userLibraryApi.getItem(id.toUUID()).content.also {
+                            revalidationScope.launch { diskCache.writeItem(it) }
+                        }
+                    if (cached != null) {
+                        revalidateItem(id)
+                    }
+                    itemFactory.create(dto)
+                }
             }
         }
     }
@@ -129,7 +142,16 @@ class JellyfinMediaTree(
 
             LATEST_ALBUMS -> childrenWithCache(id, ::fetchLatestAlbums, ::buildItems)
             RANDOM_ALBUMS -> getRandomAlbums()
-            FAVOURITES -> childrenWithCache(id, ::fetchFavourites, ::buildFavouriteItems)
+            FAVOURITES -> childrenWithCache(id, ::fetchFavourites) { dtos ->
+                val items = buildFavouriteItems(dtos)
+                // A pinned "Play all" row like Artists have, but only when something is actually
+                // playable: a favourites list of only albums/artists has no loose tracks to play.
+                if (items.any { it.mediaMetadata.isPlayable == true }) {
+                    withPlayAll(FAVOURITES, isArtist = false, items)
+                } else {
+                    items
+                }
+            }
             PLAYLISTS -> childrenWithCache(id, ::fetchPlaylists, ::buildItems)
             // Same data, but each keyed by the browsed parent id so revalidation notifies the
             // right subscription.
@@ -257,7 +279,19 @@ class JellyfinMediaTree(
         dtos.mapNotNull { buildItem(it) }
 
     private fun buildFavouriteItems(dtos: List<BaseItemDto>): List<MediaItem> =
-        dtos.mapNotNull { buildItem(it, groupForItem(it)) }
+        dtos.mapNotNull { buildItem(it, groupForItem(it))?.let(::asSingle) }
+
+    // Re-tags a track row so tapping it plays only that track, not its album (see SINGLE_PREFIX).
+    // Non-track items (favourited albums/artists, search albums/playlists) are returned unchanged,
+    // since tapping those should still browse or play them as a unit.
+    private fun asSingle(item: MediaItem): MediaItem {
+        if (item.mediaMetadata.mediaType != MEDIA_TYPE_MUSIC) {
+            return item
+        }
+        val single = item.buildUpon().setMediaId(SINGLE_PREFIX + item.mediaId).build()
+        mediaItems.put(single.mediaId, single)
+        return single
+    }
 
     private suspend fun fetchLatestAlbums(): List<BaseItemDto> {
         return api.userLibraryApi.getLatestMedia(
@@ -453,8 +487,10 @@ class JellyfinMediaTree(
             limit = 20
         )
 
+        // Track search results play alone when tapped, like Favourites tracks — a search result
+        // is not an album view, so a tap shouldn't pull in the track's whole album.
         items.addAll(response.content.items.mapNotNull {
-            buildItem(it, context.getString(R.string.tracks))
+            buildItem(it, context.getString(R.string.tracks))?.let(::asSingle)
         })
 
         return items

@@ -41,6 +41,10 @@ class MediaItemFactory(
         const val GENRES = "GENRES_ID"
         const val ALBUMS = "ALBUMS_ID"
         const val PLAY_ALL_PREFIX = "PLAY_ALL:"
+        // A track row tagged with this prefix plays only itself when tapped, instead of expanding
+        // to its album. Used for tracks listed outside an album view (Favourites, search results),
+        // where the album is not the context the user is looking at.
+        const val SINGLE_PREFIX = "SINGLE:"
         const val PARENT_KEY = "PARENT_KEY"
 
         // Transcode target when no bitrate preference is set. FDK-AAC is transparent well below
@@ -153,7 +157,11 @@ class MediaItemFactory(
     }
 
     fun playAllRow(parentId: String, isArtist: Boolean): MediaItem {
-        val label = if (isArtist) R.string.shuffle_all_songs else R.string.play_album
+        val label = when {
+            isArtist -> R.string.shuffle_all_songs
+            parentId == FAVOURITES -> R.string.play_all_favourites
+            else -> R.string.play_album
+        }
 
         val metadata = MediaMetadata.Builder()
             .setTitle(context.getString(label))
@@ -391,10 +399,11 @@ class MediaItemFactory(
             extras.putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, group)
         }
 
-        // A track's "play all" context is its own album, taken straight from the DTO. Using the
-        // intrinsic album id (instead of the screen the track happened to be browsed from) means
-        // the context survives a cold rebuild from disk/network and can never be clobbered in the
-        // shared id-keyed cache by an unrelated browse — tapping a track always queues its album.
+        // A track's album-expand context is its own album, taken straight from the DTO — so a tap
+        // inside an album view queues the whole album (positioned at the track), and that survives
+        // a cold rebuild from disk/network. Rows the user is NOT browsing as an album (Favourites,
+        // search results) are re-tagged with SINGLE_PREFIX by the tree so tapping them plays just
+        // the track; see JellyfinMediaTree.asSingle and the callback's isSingleItemWithParent.
         item.albumId?.let { extras.putString(PARENT_KEY, it.toString()) }
 
         val metadata = MediaMetadata.Builder()

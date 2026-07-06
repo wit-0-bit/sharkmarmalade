@@ -83,8 +83,15 @@ Two passes:
 
 ## For the owner to confirm
 
-- **Behavioral change:** tapping an individual track (from Favourites or search) now queues that
-  track's **album** rather than the surrounding list. This falls out of the PARENT_KEY=albumId fix
-  (which is what makes the context clobbering/cold-loss bugs go away). Playing a whole playlist is
-  unaffected (playlists play as a unit). If you'd rather Favourites played in sequence, that's a
-  design decision to revisit — say the word.
+- **Behavioral change — RESOLVED (owner decision 2026-07-06).** The overnight PARENT_KEY=albumId
+  fix briefly made *every* track tap queue the album. Owner: a tap should only queue the album
+  *inside an album view*. Final behaviour:
+  - Album view: tap a track → queue the whole album (positioned at the track). Unchanged.
+  - Favourites / search: tap a track → play **just that track**. Rows are tagged `SINGLE_PREFIX`
+    so the tap path skips album expansion; the queue strips the tag back to raw ids.
+  - Favourites gained a pinned **"Play all favourites"** row (in order), like Artists' shuffle-all,
+    shown only when the list has loose tracks.
+
+  One consequence to eyeball in the car: **voice search for a specific song now plays just that
+  song** (it shares the search path), rather than the song in its album. Say the word if you'd
+  rather voice kept the album context.

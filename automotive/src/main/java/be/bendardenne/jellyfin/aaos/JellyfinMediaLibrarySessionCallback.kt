@@ -34,6 +34,7 @@ import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PARENT_KEY
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAY_ALL_PREFIX
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.RANDOM_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.SINGLE_PREFIX
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_BITRATE
 import be.bendardenne.jellyfin.aaos.signin.SignInActivity
@@ -433,13 +434,15 @@ class JellyfinMediaLibrarySessionCallback(
             tree.getItem(parentId).mediaMetadata.mediaType == MediaMetadata.MEDIA_TYPE_ARTIST
 
         val children = realChildren(parentId)
-        val tracks = if (isArtist) {
+        val tracks = (if (isArtist) {
             children.flatMap { album ->
                 realChildren(album.mediaId).filter { it.mediaMetadata.isPlayable == true }
             }
         } else {
+            // Favourites' playable children are SINGLE-tagged tracks; strip the tag so the queue
+            // carries raw ids. Artist/album children are already raw, so this is a no-op for them.
             children.filter { it.mediaMetadata.isPlayable == true }
-        }
+        }).map(::stripSingle)
 
         if (tracks.isNotEmpty()) {
             session.player.shuffleModeEnabled = isArtist
@@ -448,6 +451,16 @@ class JellyfinMediaLibrarySessionCallback(
 
         return tracks
     }
+
+    // A play-all queue must carry raw track ids (rating/resumption/reporting key off them), so undo
+    // any SINGLE tag a Favourites/search row carries. The item already holds the real track's uri
+    // and metadata; only the id needs restoring.
+    private fun stripSingle(item: MediaItem): MediaItem =
+        if (item.mediaId.startsWith(SINGLE_PREFIX)) {
+            item.buildUpon().setMediaId(item.mediaId.removePrefix(SINGLE_PREFIX)).build()
+        } else {
+            item
+        }
 
     /**
      * Detects a (legacy) play/prepare-from-search request. Assistant's onPlayFromSearch is
@@ -612,8 +625,11 @@ class JellyfinMediaLibrarySessionCallback(
     }
 
     private suspend fun isSingleItemWithParent(mediaItems: List<MediaItem>): Boolean {
-        return mediaItems.size == 1 &&
-                tree.getItem(mediaItems[0].mediaId).mediaMetadata.extras?.containsKey(PARENT_KEY) == true
+        if (mediaItems.size != 1) return false
+        // A row tagged SINGLE (a track listed outside an album view — Favourites, search) plays
+        // only itself; it must not expand to its album even though the track has one.
+        if (mediaItems[0].mediaId.startsWith(SINGLE_PREFIX)) return false
+        return tree.getItem(mediaItems[0].mediaId).mediaMetadata.extras?.containsKey(PARENT_KEY) == true
     }
 
     private suspend fun expandSingleItem(item: MediaItem): List<MediaItem> {
@@ -645,13 +661,16 @@ class JellyfinMediaLibrarySessionCallback(
         val playlist = mutableListOf<MediaItem>()
 
         mediaItems.forEach {
+            // A SINGLE-tagged row resolves to its plain track, so the queued item carries the raw
+            // track id (what rating/resumption/reporting key off), not the synthetic tag.
+            val id = it.mediaId.removePrefix(SINGLE_PREFIX)
             // Pinned "Play All" rows are intercepted upstream; never queue one as a track.
             // Blank ids (search requests are intercepted upstream too) would crash toUUID().
-            if (it.mediaId.isBlank() || it.mediaId.startsWith(PLAY_ALL_PREFIX)) {
+            if (id.isBlank() || id.startsWith(PLAY_ALL_PREFIX)) {
                 return@forEach
             }
             // We need to call getItem to resolve the full item: the provided MediaItem only has an ID.
-            val item = tree.getItem(it.mediaId)
+            val item = tree.getItem(id)
             // If the item is an album or playlist, get its children and add them to the playlist.
             // Albums and playlists are "immediately playable" items, that actually load their
             // children (tracks).
@@ -784,12 +803,16 @@ class JellyfinMediaLibrarySessionCallback(
         }
         Log.i(LOG_MARKER, "onSetRating ${rating.isHeart}")
 
+        // A rating can arrive against a SINGLE-tagged Favourites/search row; the queue and the
+        // server both key off the raw track id.
+        val ratedId = mediaId.removePrefix(SINGLE_PREFIX)
+
         // Update the queued item whose id matches the rated one, not whichever item happens to be
         // playing (rating a non-current track otherwise toggled the heart on the wrong track).
         val player = session.player
         for (i in 0 until player.mediaItemCount) {
             val queued = player.getMediaItemAt(i)
-            if (queued.mediaId == mediaId) {
+            if (queued.mediaId == ratedId) {
                 val metadata = queued.mediaMetadata.buildUpon().setUserRating(rating).build()
                 player.replaceMediaItem(i, queued.buildUpon().setMediaMetadata(metadata).build())
                 break
@@ -797,7 +820,7 @@ class JellyfinMediaLibrarySessionCallback(
         }
 
         return SuspendToFutureAdapter.launchFuture {
-            applyRating(mediaId, rating)
+            applyRating(ratedId, rating)
             SessionResult(SessionResult.RESULT_SUCCESS)
         }
     }

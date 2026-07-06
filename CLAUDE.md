@@ -88,15 +88,25 @@ tree node ids so revalidation notifies the right subscription). Old root tabs La
 Albums/Playlists moved into Browse as Recents/Playlists.
 
 **Artists and albums are purely browsable** (`isBrowsable=true, isPlayable=false`). Playing:
-- Tapping a track queues its whole parent (album/playlist) in order via the `PARENT_KEY` extra +
-  `expandSingleItem()` — so an album needs no explicit play affordance.
+- **Track tap is context-sensitive, keyed off the row's `mediaId`** (the only thing the car host
+  echoes back on a tap — `getItem(trackId)` itself is context-free). *Inside an album view*,
+  tapping a track queues the whole album in order, positioned at the track, via the `PARENT_KEY`
+  extra (= `item.albumId`) + `expandSingleItem()` — so an album needs no explicit play affordance.
+  *Outside an album view* (Favourites, search results), track rows are re-tagged
+  `SINGLE_PREFIX` (`"SINGLE:<trackId>"`) by `JellyfinMediaTree.asSingle()`, so `isSingleItemWithParent`
+  short-circuits and a tap plays **just that track**. The resolved queue always strips the tag back
+  to raw ids (`stripSingle`/`resolveMediaItems`) so rating/resumption/reporting keep working.
+  (Owner decision 2026-07-06: reverses the brief "every tap queues the album" behaviour from the
+  overnight run.)
 - Artist listings get a pinned synthetic first row **"▶ Shuffle all songs"** (`mediaId =
   "PLAY_ALL:<artistId>"`), intercepted in `onSetMediaItems`/`onAddMediaItems` *before* the
   PARENT_KEY path, resolved to all of the artist's tracks with `shuffleModeEnabled = true`,
   filtered out of `resolveMediaItems()` recursion. The row is only ever added by builder lambdas,
-  never persisted (disk cache holds real DTOs only). An album flavor of
-  `playAllRow()`/`resolvePlayAll()` is kept only so a host holding a stale cached row resolves
-  gracefully — the album row itself was dropped as redundant.
+  never persisted (disk cache holds real DTOs only). **Favourites gets the same treatment**: a
+  pinned **"Play all favourites"** row (`PLAY_ALL:FAVOURITES_ID`, in-order, `shuffle` off), added
+  only when the list has ≥1 loose track. An album flavor of `playAllRow()`/`resolvePlayAll()` is
+  kept only so a host holding a stale cached row resolves gracefully — the album row itself was
+  dropped as redundant.
 - The old `PREF_ALBUM_BEHAVIOUR` preference is gone (one-time `remove("album_behaviour")` purge in
   `SharkMarmaladeApplication`).
 
