@@ -12,6 +12,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaLibraryService
@@ -132,7 +133,13 @@ class JellyfinMusicService : MediaLibraryService() {
         val headers = jellyfinApi.auth(accountManager)
 
         val authedFactory = DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers)
-        mediaSourceFactory.setDataSourceFactory(authedFactory)
+        val cachedFactory = CacheDataSource.Factory()
+            .setCache(AudioCache.getInstance(this))
+            .setCacheKeyFactory(AudioCache.cacheKeyFactory)
+            .setUpstreamDataSourceFactory(authedFactory)
+            // A cache I/O problem should degrade to plain network, not fail playback.
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        mediaSourceFactory.setDataSourceFactory(cachedFactory)
 
         // Trigger a refresh upon login.
         mediaLibrarySession.notifyChildrenChanged(ROOT_ID, 4, null)
