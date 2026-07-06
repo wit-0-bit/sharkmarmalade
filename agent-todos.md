@@ -1,62 +1,90 @@
 # Agent TODOs — overnight autonomous run (2026-07-06 ~02:00)
 
-Code-only subset of `TODO.md` that can be done without the owner. **Excluded** (need the owner):
-Play Console / release-signing setup, in-car testing, the placeholder-hint UI bug (owner said
-skip; couldn't reproduce). Verified file:line detail for each item lives in `CLAUDE.md` "Known
-issues". Work on branch `overnight-fixes`; commit locally per group; **no push/fetch/pull** (1Password).
-Build (`./gradlew :automotive:assembleDebug`) must stay green at every commit.
+Code-only subset of `TODO.md`, done autonomously on branch `overnight-fixes` (base = `main` at
+b95d625). Each group was implemented, built green (`./gradlew :automotive:assembleDebug`), and
+committed locally. **Not pushed** (1Password SSH prompt unavailable overnight) — the owner pushes
+in the morning. **Excluded** (need the owner): Play Console / release-signing, in-car testing, the
+placeholder-hint UI bug.
 
 ## §1 Car-blockers
 
-- [ ] **QuickConnect sign-in batch** (`signin/`)
-  - [ ] Wrap the polling coroutine's API calls in try/catch — an expired code (Jellyfin expires
-        after 10 min) or a network blip must not crash the app on the sign-in screen.
-  - [ ] Exit the poll loop on successful auth (today it re-authenticates every second forever).
-  - [ ] Guard against double-started loops sharing the single `quickConnectSecret` field.
-  - [ ] `SignInActivity`: release the MediaController; guard `future.await()`.
-  - [ ] Keep the QuickConnect code a String end-to-end (SDK type is String; drop `Integer.valueOf`).
-- [ ] **Empty-container-tap guard** (`JellyfinMediaLibrarySessionCallback.onSetMediaItems`) — an
-      empty `resolveMediaItems` result must not `setMediaItems([])` (wipes queue) + `savePlaylist("")`
-      (destroys resumption). Mirror the throw-instead guard the voice path already has.
-- [ ] **Playlist audio-type filter** (`JellyfinMediaTree.fetchItemChildren`/`fetchPlaylists`) — a
-      non-audio child currently throws in `MediaItemFactory.create`, breaking the whole browse/play.
-- [ ] **slf4j binding fix** (`build.gradle.kts`) — `slf4j-api` 2.0.17 can't bind `slf4j-android`
-      1.7.36, so all SDK logs are NOP'd (kills car diagnostics).
+- [x] **QuickConnect sign-in batch** (`4c8a50c`)
+  - [x] try/catch so an expired code / network blip can't crash the sign-in screen
+  - [x] exit the poll loop on successful auth
+  - [x] Job guard against double-started loops
+  - [x] `SignInActivity`: release the MediaController; guard `future.await()`
+  - [x] QuickConnect code kept a String end-to-end
+- [x] **Empty-container-tap guard** in `onSetMediaItems` (`7599786`) — empty resolve now fails the
+      request (queue + resumption preserved) instead of wiping them.
+- [x] **Playlist audio-type filter** (`f8197d2`) — `fetchItemChildren` restricted to AUDIO + a
+      `buildItem` belt that skips (not throws on) an unsupported child.
+- [x] **slf4j** — first removed the deps as "dead" (`e6780ac`), then **runtime testing caught a
+      fatal `NoClassDefFoundError`** and I restored them (`<restore>`). The SDK's okhttp engine logs
+      via kotlin-logging → slf4j, so `slf4j-api` is a required runtime dep (loaded transitively, not
+      visible in the jellyfin jars). Net effect: no dep change, plus a load-bearing comment so it
+      can't be removed again. The original "binding is NO-OP" finding is true but harmless.
 
 ## §2 Robustness
 
-- [ ] **PARENT_KEY twins** (`JellyfinMediaTree` + `Callback` + `MediaItemFactory`)
-  - [ ] cold-path `getItem`/`revalidateItem` rebuild tracks with `parent=null` → lost album context.
-  - [ ] RAM cache keyed by raw id → cross-browse-context `PARENT_KEY` clobbering.
-- [ ] **try/catch around `clientLogApi.logFile`** (`settings/SettingsFragmentViewModel`).
-- [ ] **try/catch on `JellyfinMediaTree` foreground fetches** (cold-miss browse / random / search /
-      item resolution) — surface a distinguishable error instead of an opaque failed future.
-- [ ] **Log `reportPlayback` failures** (`JellyfinMusicService`) — currently completely silent.
-- [ ] **`limit` on `fetchFavourites`** (`JellyfinMediaTree`).
-- [ ] **Real pagination** — respect `page`/`pageSize` + `startIndex` in
-      `onGetChildren`/`onGetSearchResult`; leave `fetchItemChildren` unbounded (it's the play queue).
-- [ ] **`storeAccount` addAccountExplicitly-returns-false handling** (`JellyfinAccountManager`) —
-      same-username/new-server re-login currently bricks auth permanently.
+- [x] **PARENT_KEY twins** (`f8197d2`) — track play-all context now derived from the intrinsic
+      `albumId`, fixing both cold-path loss and cross-context clobbering. **Behavioral change:**
+      tapping a track (from Favourites, search, or a playlist) now queues its **album** rather than
+      the browse container — cleaner and deterministic; flagged for the owner to confirm.
+- [x] **try/catch around `clientLogApi.logFile`** (`03bd4d8`).
+- [x] **Foreground fetch error surfacing** (`7599786`) — onGetChildren/onGetItem/onSearch/
+      onGetSearchResult map a failure to a distinguishable result (401 → sign-in, else logged
+      generic error) instead of an opaque failed future.
+- [x] **Log `reportPlayback` failures** (`abd5244`).
+- [x] **`limit` on `fetchFavourites`** (`f8197d2`).
+- [x] **Pagination** (`7599786`) — onGetChildren/onGetSearchResult honour the host's page/pageSize
+      by slicing. NOTE: reachability past the 120 fetch cap (true server-side windowing) is still a
+      follow-up; this stops the "ignore paging → duplicate pages" bug within the fetched set.
+- [x] **`storeAccount` addAccountExplicitly-returns-false handling** (`6a6f59c`).
 
 ## §3 Nice-to-have
 
-- [ ] **AlbumArtContentProvider**: check disk file before requiring a `uriMap` entry;
-      `createTempFile` inside the try; art-cache size cap/eviction.
-- [ ] **`ensureTree()` + `isAuthenticated`** on `onGetChildren`/`onGetItem`/`onSearch`/`onGetSearchResult`.
-- [ ] **`onSetRating`**: type-check the `HeartRating` cast; stamp the rating onto the correct queue item.
-- [ ] **Atomic `getItem` cold-miss** (Mutex / Guava loader) to avoid redundant concurrent fetches.
-- [ ] **Bitrate pref rename/relabel** — "Audio quality"; drop/relabel the misleading "Direct stream"
-      entry (transcode stays default; do NOT add a real direct-play path — deprioritized per owner).
-- [ ] **`JellyfinApi.auth`** via the SDK's own header builder.
-- [ ] **`Authenticator` `getAuthToken`/`addAccount`** contract fix (latent).
-- [ ] **`JellyfinHiltModule`** — `@Singleton`-scope the providers.
-- [ ] **Per-art-size `MediaItemFactory`** instead of first-caller-wins freeze.
-- [ ] **`ARTISTS`/`BROWSE_ARTISTS` disk-key aliasing** (negligible; do if cheap).
+- [x] **AlbumArtContentProvider** (`a7741a5`) — disk-first lookup, `createTempFile` inside the try,
+      256 MiB size cap in a dedicated `albumart/` subdir.
+- [x] **`ensureTree()` + `isAuthenticated`** on the four browse/search entry points (`7599786`).
+- [x] **`onSetRating`** (`7599786`) — type-checked cast, stamps the correct queue item.
+- [x] **Atomic `getItem` cold-miss** (`f8197d2`) — per-id Mutex + double-check.
+- [x] **Bitrate pref relabel** (`b33292e`) — "Audio quality", dropped the phantom "Direct stream",
+      default 256 kbps, value migration. No real direct-play path (deliberate).
+- [x] **`JellyfinApi.auth`** via the SDK's `AuthorizationHeaderBuilder` (`abd5244`).
+- [x] **`Authenticator` `getAuthToken`/`addAccount`** contract fix (`6add677`, latent).
+- [x] **`JellyfinHiltModule`** `@Singleton` scoping (`abd5244`).
+- [ ] **Per-art-size `MediaItemFactory`** — **deferred, deliberately.** The tree/factory bake one
+      art size and MediaItems are cached/shared across controllers; a correct per-controller fix
+      needs a bigger refactor or throws away the cache on every differing hint. Near-zero value for
+      a single-head-unit car. Left as-is (first hint wins) with this note.
+- [ ] **`ARTISTS`/`BROWSE_ARTISTS` disk-key aliasing** — **deferred, deliberately.** Owner already
+      flagged it negligible; a shared key needs notify fan-out to both parent ids. Cost today is one
+      duplicate ≤120-item fetch + one small JSON file. Not worth the added complexity.
 
-## Orchestration note
+## Verification
 
-Implemented sequentially on `overnight-fixes` with a green build gated per commit, rather than
-massively-parallel worktree agents: the three hub files (`JellyfinMediaTree`,
-`JellyfinMediaLibrarySessionCallback`, `MediaItemFactory`) are touched by most items and can't be
-safely split, and gitignored `local.properties` means isolated worktrees can't build. Fan-out
-workflows are used for adversarial verification of the finished changes.
+Two passes:
+
+1. **Runtime smoke test on the emulator** (elizardbeth.dorsal). Caught a **fatal regression the
+   source review missed**: removing slf4j crashed on the first SDK HTTP call
+   (`NoClassDefFoundError` — the SDK logs through kotlin-logging → slf4j). Restored the deps. Also
+   caught a swallowed `CancellationException` logging a misleading warning on login teardown.
+   End-to-end sign-in (ping → QuickConnect poll → username/password auth → service start → audio
+   cache sizing → LOGIN command → clean teardown) verified clean.
+
+2. **Adversarial workflow** (4 area reviewers → 2 independent verification lenses per finding).
+   Four regressions confirmed and **fixed**:
+   - QuickConnect guard blocked a newly-chosen server → skip only same-server re-entry, else restart.
+   - Track tap could silently no-op / seek to index -1 → fall back to the tapped track, coerce index.
+   - `itemLocks` grew unbounded → fixed 64-way striped locks.
+   - Art-cache trim could delete a file mid-read → catch `FileNotFoundException`, re-download.
+   One finding rejected (QuickConnect "expiry dead-end" — login still works via password; pre-change
+   crashed). One design change flagged for the owner (below).
+
+## For the owner to confirm
+
+- **Behavioral change:** tapping an individual track (from Favourites or search) now queues that
+  track's **album** rather than the surrounding list. This falls out of the PARENT_KEY=albumId fix
+  (which is what makes the context clobbering/cold-loss bugs go away). Playing a whole playlist is
+  unaffected (playlists play as a unit). If you'd rather Favourites played in sequence, that's a
+  design decision to revisit — say the word.

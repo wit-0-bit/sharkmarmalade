@@ -185,6 +185,22 @@ relevant). **Fixed and closed items are listed at the bottom so they don't get r
 Actionable tracking (with priorities reshuffled toward getting the app into the actual car) lives
 in `TODO.md` — this list is the reference state.
 
+> **STATUS (2026-07-06, `overnight-fixes` branch — local, unpushed):** an autonomous run fixed
+> nearly all of the list below. **Fixed & verified:** the High QuickConnect crash + the loop never
+> terminating; the empty-playlist-tap queue/resumption wipe; non-audio playlist children; the
+> `storeAccount` moved-server corruption; `clientLogApi.logFile` uncaught; foreground-fetch error
+> surfacing (401→sign-in); silent `reportPlayback` failures; `fetchFavourites` limit; page/pageSize
+> paging (within the fetch cap); the three `AlbumArtContentProvider` items; `ensureTree`/auth on the
+> four browse/search entry points; `onSetRating` cast+wrong-item; atomic `getItem`; the bitrate-pref
+> mislabel; `JellyfinApi.auth` via the SDK builder; the `Authenticator` contract; Hilt scoping. The
+> PARENT_KEY twins were fixed by making a track's context its **album** (`MediaItemFactory.forTrack`
+> uses `item.albumId`) — see the behavioral-change note in `agent-todos.md`. An adversarial pass then
+> caught and fixed four self-introduced regressions (over-broad QuickConnect guard, track-tap
+> no-op/index, unbounded `itemLocks`, art-trim TOCTOU). **Still open:** true pagination *past* the
+> 120 fetch cap; per-art-size factory (deferred — negligible for one head unit); `ARTISTS`/
+> `BROWSE_ARTISTS` disk-key aliasing (deferred — negligible). Build green throughout; sign-in
+> verified end-to-end on the emulator. The detailed list below is the pre-fix reference.
+
 **High**
 - `signin/SignInActivityViewModel.kt:61-113` — the QuickConnect polling coroutine has **zero
   error handling** and the SDK throws on every non-2xx/IO failure (verified in jellyfin-api

@@ -4,6 +4,15 @@ Actionable tracker, reordered 2026-07-06 around the current goal: **get this bui
 actual Polestar 3.** `CLAUDE.md`'s "Known issues" section is the verified reference state (with
 file:line evidence and how each item was verified); this file is what to do about it, in order.
 
+> **STATUS (2026-07-06):** the code items below were implemented on the `overnight-fixes` branch
+> (local, unpushed) and are tracked in `agent-todos.md`. Almost everything in §2/§3 and the code
+> parts of §1 (QuickConnect batch, etc.) is **done, built green, and adversarially verified**;
+> sign-in was verified end-to-end on the emulator. **What still needs the owner:** `git push` the
+> branch (held back overnight — 1Password), the release-signing + Play Console closed-track setup,
+> and the in-car test. **Deferred code items** (deliberately, low value): true pagination past the
+> 120 fetch cap, per-art-size factory, ARTISTS/BROWSE_ARTISTS disk-key aliasing. There is also one
+> **behavioral change to confirm** (track tap → album, not the browsed list) — see `agent-todos.md`.
+
 ## 1. Road to the car
 
 - [ ] **Fix the QuickConnect sign-in flow** (`signin/` — one contained batch, and the gate for
