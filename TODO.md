@@ -1,115 +1,116 @@
 # TODO
 
-Bugs and cleanup surfaced during the architecture review in `CLAUDE.md` (see there for full
-detail, exact line numbers, and how each finding was verified). Grouped by how much it's worth
-prioritizing, not by severity alone — a high-severity bug behind a rare edge case can rank below a
-medium one that's trivial to fix and hit constantly.
+Actionable tracker, reordered 2026-07-06 around the current goal: **get this build running in the
+actual Polestar 3.** `CLAUDE.md`'s "Known issues" section is the verified reference state (with
+file:line evidence and how each item was verified); this file is what to do about it, in order.
 
-## Fix soon
+## 1. Road to the car
 
-Real, concretely-reachable bugs with contained, low-risk fixes.
+- [ ] **Fix the QuickConnect sign-in flow** (`signin/` — one contained batch, and the gate for
+      everything else: in-car sign-in *is* QuickConnect on a screen you can't type on easily).
+      - [ ] Wrap the polling coroutine's API calls in try/catch — today a >10-minute-old code
+            (Jellyfin expires them) or any network blip **crashes the app** on the sign-in screen.
+            Expired code should restart with a fresh code; transient errors should keep polling.
+      - [ ] Exit the poll loop on successful authentication (today it re-authenticates every
+            second forever, minting a new server session each time and re-firing `loggedIn`).
+      - [ ] Guard against double-started loops (fires on every `onViewCreated`; back-and-forward
+            navigation runs two loops sharing one `quickConnectSecret` field).
+      - [ ] `SignInActivity`: release the MediaController, guard `future.await()`.
+      - [ ] While in there: keep the QuickConnect code a String end-to-end (SDK type is String;
+            `Integer.valueOf` works only because current servers generate 100000–999999).
+- [ ] **Guard the empty-container tap** in `onSetMediaItems`: an empty `resolveMediaItems` result
+      currently wipes the live queue AND overwrites saved resumption state (`savePlaylist([])`).
+      Apply the same throw-instead guard the voice path already has.
+- [ ] **Filter playlist children to audio**: `fetchItemChildren` + `MediaItemFactory.create()`
+      make any video/mixed playlist deterministically unbrowsable/unplayable (one non-audio child
+      → `UnsupportedOperationException`). Either request `includeItemTypes=[AUDIO]` for playlist
+      children or skip unknown kinds in the builders instead of throwing.
+- [ ] **Fix the slf4j binding** (`slf4j-api` 2.0.17 can't bind 1.7-style `slf4j-android` → all
+      Jellyfin SDK logs are silently NOP'd). Cheap, and car debugging depends on logs: either pin
+      `slf4j-api` 1.7.36 or use a 2.x-compatible Android provider.
+- [ ] **Release signing + Play Console setup** (manual steps, owner's account):
+      - [ ] Generate an upload keystore; add a `release` `signingConfig`.
+      - [ ] Play Console developer account ($25 one-time) → new app → enable the Android
+            Automotive OS release type (Advanced Settings, "Automotive only") → **closed testing**
+            track (forums report Polestars need closed, not internal) → upload the signed build →
+            add the car's Google account as a tester.
+      - [ ] Verify whether the automotive closed track triggers driver-distraction review (policy
+            has shifted over the years); if so it's a delay, not a blocker.
+- [ ] **In-car test checklist** (what the emulator can't prove): real Assistant voice queries
+      end-to-end; seek slider behavior on the actual head unit; streaming + cache behavior on
+      cellular; scrobbling/playstate reporting to the server from the car; QuickConnect sign-in
+      on the car screen.
 
-All seven below are **done** — fixed, adversarially verified against the actual diff, and confirmed
-against a real `./gradlew :automotive:assembleDebug` build (BUILD SUCCESSFUL). Not yet committed —
-changes are sitting in the working tree. See `git diff` for the three touched files.
+## 2. Robustness batch (after the car works, unless something bites first)
 
-- [x] `JellyfinMediaLibrarySessionCallback.kt` — guard the `prefListener` against `tree` not being
-      initialized yet (currently throws `UninitializedPropertyAccessException` if a preference is
-      changed before any browser has connected).
-- [x] `JellyfinMediaLibrarySessionCallback.kt` `onPlaybackResumption` — handle the empty
-      `PLAYLIST_IDS_PREF` case (`"".split(",")` yields `listOf("")`, not `[]`) so first-run/fresh-data
-      playback resumption doesn't throw.
-- [x] `AlbumArtContentProvider.kt` — don't hold the `inProgress` lock while blocked on the 15s
-      `.await()`; it currently serializes *all* concurrent album-art loads app-wide, not just
-      repeated requests for the same URI.
-- [x] `AlbumArtContentProvider.kt` — move the `inProgress.remove()`/`countDown()` cleanup inside a
-      synchronized block (it currently races unsynchronized against `contains()`/`put()` for other
-      URIs on the same shared `HashMap`).
-- [x] `AlbumArtContentProvider.kt` — handle non-200/null-body downloads (e.g. a normal 404 for
-      missing art) without throwing an uncaught `FileNotFoundException` and leaking the temp file.
-- [x] `AlbumArtContentProvider.kt` — cap or evict `uriMap` (companion object, unbounded for the
-      whole process lifetime today). Fixed via a 2000-entry access-order `LinkedHashMap` with
-      `removeEldestEntry` eviction — note the accepted tradeoff this introduces: once a URI's
-      mapping is evicted, a request for it now throws `FileNotFoundException` even if the image
-      bytes are still sitting in the disk cache (rare at 2000 entries, but real).
-- [x] `SettingsFragmentViewModel.kt` `sendLogs()` — fix the `Process` stream-deadlock (blocking read
-      of `errorStream` without concurrently draining `inputStream`, plus a discarded `waitFor()`
-      timeout result); today this can leave "Uploading..." stuck forever.
+- [ ] `JellyfinMediaTree.kt` — the **PARENT_KEY twins**, best fixed together:
+      - [ ] cold-path `getItem()`/`revalidateItem()` rebuild tracks with `parent=null`, so a tap
+            after RAM eviction / process restart queues a single track with no album context;
+      - [ ] the RAM cache is keyed by raw id, so an unrelated browse (e.g. a playlist containing
+            a favourited track) clobbers another context's `PARENT_KEY` (wrong tracklist queued).
+      Likely shape: stop storing browse context in the shared cache — resolve the parent at tap
+      time (e.g. from the DTO's own albumId) or namespace cached entries by context.
+- [ ] `SettingsFragmentViewModel.kt` — try/catch around `clientLogApi.logFile` (expired token →
+      crash from a Settings tap today).
+- [ ] `JellyfinMediaTree.kt` — try/catch + distinguishable errors on the foreground fetch paths
+      (cold-miss browse, random, search, item resolution); background revalidation already copes.
+- [ ] `JellyfinMusicService.kt` — at minimum log `reportPlayback` failures (verified completely
+      silent today: failed future is discarded, scrobbles vanish without trace).
+- [ ] `JellyfinMediaTree.kt` — add a `limit` to `fetchFavourites` (the one remaining unbounded
+      listing without an in-code justification).
+- [ ] Real pagination: respect `page`/`pageSize` in `onGetChildren`/`onGetSearchResult`, add
+      `startIndex` paging past the 120 cap (matters more now that Artists/Browse are permanent
+      tabs). Deliberate exception: `fetchItemChildren` stays unbounded — those children are the
+      playback queue, and truncating them changes what plays.
+- [ ] `JellyfinAccountManager.storeAccount` — handle `addAccountExplicitly` returning false
+      (same-username/new-server re-login currently bricks auth permanently, and there's no
+      sign-out anywhere to recover). Cheap correct fix: update the existing account's userdata,
+      or remove+re-add.
 
-Minor residuals noted by verification, not worth separate follow-up unless they bite in practice:
-`File.createTempFile()` in `AlbumArtContentProvider.kt` sits just outside the new try/catch, so if
-it throws (e.g. disk full) the `inProgress` entry for that URI still leaks — narrower than the
-original bug, pre-existing, not introduced by this fix. In `SettingsFragmentViewModel.kt`, an
-`IOException` inside a reader thread is swallowed by the thread's default handler rather than
-surfaced, and if `waitFor` itself throws the two reader threads aren't explicitly joined/destroyed
-in the catch block — both low-probability and non-blocking given `logcat -t 500` is bounded.
+## 3. Nice to have
 
-## Worth doing
+- [ ] `AlbumArtContentProvider.kt` — check the disk file **before** requiring a `uriMap` entry in
+      `openFile` (art for host-persisted URIs — e.g. the resumption card after process death —
+      currently throws despite cached bytes); move `createTempFile` inside the try (a disk-full
+      throw currently leaves a dead latch that breaks that URI until process death); give the art
+      cache a size cap (last unbounded cache; pairs well with the Downloads design).
+- [ ] `JellyfinMediaLibrarySessionCallback.kt` — extend `ensureTree()` + the `isAuthenticated`
+      guard to `onGetChildren`/`onGetItem`/`onSearch`/`onGetSearchResult` (verified non-crashing
+      and unreachable from legacy hosts, so cosmetic today); type-check `onSetRating`'s cast and
+      only stamp the rating onto the matching queue item.
+- [ ] `JellyfinMediaTree.getItem()` — make the cold-miss check-then-act atomic (Mutex or Guava
+      `get(key, loader)`); revalidation paths already dedup in-flight work.
+- [ ] Rename the bitrate pref to "Audio quality" and drop or relabel the misleading
+      "Direct stream" entry (it silently delivers the same AAC-256 transcode as "256 kbps").
+      A true direct-play option is **deliberately deprioritized** (owner: always-transcode is the
+      right behavior for the one real user; server has libfdk_aac) — only worth building if the
+      server can't transcode someday. If it lands, remap existing stored `"Direct stream"` values
+      so current installs keep transcoding.
+- [ ] `JellyfinApi.auth()` — replace the hand-rolled Authorization header with the SDK's own
+      builder. `auth/Authenticator.kt` — fix `getAuthToken`'s token type mismatch + `addAccount`
+      contract (latent; the app only uses `peekAuthToken`). `JellyfinHiltModule` —
+      `@Singleton`-scope the providers.
+- [ ] `onGetLibraryRoot` — per-art-size `MediaItemFactory` instead of first-caller-wins freeze
+      (now includes `ensureTree()`'s 512 default when voice/resumption arrives first).
+- [ ] `ARTISTS`/`BROWSE_ARTISTS` disk-key aliasing (verified negligible: one duplicate ≤120-item
+      fetch + small JSON file; a shared key would need notify fan-out to both parent ids).
+- [ ] Confirm Genre stays as a Browse category (suggested, SDK-backed, never explicitly
+      requested). `Year` remains available via `YearsApi` if ever wanted.
 
-Real correctness/robustness gaps, moderate effort.
+## Done / settled (keep for the record, don't re-report)
 
-- [ ] `JellyfinMediaTree.kt` — add a `limit` to `getItemChildren`/`getArtistAlbums`/`getFavourite`
-      (currently unbounded, unlike every other listing query in the file).
-- [ ] `JellyfinMediaTree.kt` — fix the `mediaItems` cache clobbering a track's `PARENT_KEY` across
-      unrelated browse contexts (can queue the wrong parent's tracklist for playback).
-- [ ] `JellyfinMediaTree.kt` / `JellyfinMediaLibrarySessionCallback.kt` — respect the host's
-      `page`/`pageSize` in `onGetChildren`/`onGetSearchResult`, and add real `startIndex`-based
-      pagination instead of the flat `maxItemsPerPage=120` cutoff. Worth doing together with the
-      Artists/Albums redesign, since Artists becomes a permanent, prominent tab that inherits this cap.
-- [ ] `JellyfinMediaTree.kt` — wrap the Jellyfin API calls in try/catch and surface a distinguishable
-      error (instead of an opaque failed future indistinguishable from a real auth/data error).
-- [ ] `SettingsFragmentViewModel.kt` — wrap `api.clientLogApi.logFile(content)` in try/catch (no
-      `CoroutineExceptionHandler` exists anywhere in the app today).
-
-## Nice to have
-
-Lower priority: real but low-impact, speculative, or purely maintainability.
-
-- [ ] `JellyfinMediaTree.kt` `getItem()` — make the cache-aside check-then-act atomic (Guava's
-      `get(key, Callable)` or a `Mutex`) to avoid redundant network calls on concurrent access.
-- [ ] `JellyfinApi.kt` `auth()` — replace the hand-rolled `Authorization` header with the Jellyfin
-      SDK's own `AuthorizationHeaderBuilder` (already used internally by every SDK-mediated call) to
-      remove the risk of the two implementations drifting apart.
-- [ ] `JellyfinMediaLibrarySessionCallback.kt` — harden or document the `subscriptions` map's
-      implicit single-thread assumption (currently safe in practice, not enforced in code).
-- [ ] `JellyfinMediaLibrarySessionCallback.kt` `onGetLibraryRoot` — rebuild `tree`/`itemFactory` per
-      differing art-size hint instead of freezing it from whichever controller connects first.
-- [x] `JellyfinMediaTree.kt` `getChildren()` — cache resolved child *lists* per parent id, not just
-      individual items, so revisiting a folder doesn't always re-hit the network. Done via the
-      stale-while-revalidate disk cache (`MediaTreeDiskCache.kt`, see `CLAUDE.md` "Caching").
-- [ ] `JellyfinHiltModule.kt` — consider `@Singleton`-scoping `provideJellyfin()`/`provideAccountManager()`
-      so future mutable state doesn't silently diverge across injection sites.
-- [ ] `JellyfinMusicService.kt` — double check `currentPlaybackTime`/`currentTrack` visibility across
-      threads (may need `@Volatile`); flagged with lower confidence, unconfirmed dispatch behavior.
-
-## Design decisions to make (not bugs)
-
-- [x] Build the redesign as currently specced in `CLAUDE.md` — **done** on the `browse-redesign`
-      branch (root = Random / Artists / Favourites / Browse; Browse = Artists / Genres / Albums /
-      Recents / Playlists; pinned "▶ Play All" rows; `PREF_ALBUM_BEHAVIOUR` removed with a one-time
-      orphaned-key purge). See the status callout in `CLAUDE.md` for accepted residuals.
-- [ ] Confirm Genre is actually wanted as a Browse category — suggested (and backed by real Jellyfin
-      SDK support via `MusicGenresApi`), not explicitly requested like the others. `Year` was also
-      suggested and backed by real SDK support (`YearsApi`) but didn't make the latest list — left
-      out for now, trivial to add later if wanted.
-- [ ] Decide how to handle the depth tradeoff: Browse → Artist and Browse → Genre are 4 levels deep
-      (one past Google's "avoid >3 levels" guidance, whose stated rationale is driver distraction).
-      Artist has a compliant 3-level escape hatch via the direct root tab; Genre doesn't. See
-      `CLAUDE.md`'s "Depth check" callout.
-- [ ] Fix (or at least prioritize) the `mediaItems` cache-clobbering bug in Known Issues before/
-      alongside this redesign — its most concrete repro scenario (Favourites vs. Playlist
-      `PARENT_KEY` collision) stays fully live now that both are back in the app.
-- [x] Implement the pinned "▶ Play All" synthetic row — done as part of the redesign, then
-      narrowed per the app owner: artists only ("Shuffle all songs"); the album row was dropped as
-      redundant with tapping track 1 (PARENT_KEY expansion already queues the full album). Low-severity residuals worth a later pass:
-      shuffle-mode side effect on the add-to-queue path, sequential album gathering on first
-      shuffle-all tap, notify itemCount off-by-one for synthetic-row parents.
-- [x] Voice search — **done** (`voice-search` branch), but NOT via App Actions/`shortcuts.xml` as
-      originally guessed: on AAOS Assistant uses the media session's play-from-search, which media3
-      delivers as a blank-mediaId item in `onSetMediaItems` (previously crashed in `"".toUUID()`).
-      See `CLAUDE.md` for the full mechanism and residuals. Needs a real-Assistant test in the car.
-- [x] Better caching — **done** (audio `SimpleCache` 1 GiB LRU + stale-while-revalidate disk cache
-      for the media tree; built, adversarially verified, uncommitted — see `CLAUDE.md` "Caching"
-      for design, invariants, and accepted residuals). Remaining from that theme: the album-art
-      cache still has no size cap/eviction.
-- [ ] Downloads (offline playback) — flagged as wanted, not yet designed (see `CLAUDE.md`).
+- [x] 2026-07-05..06: browse redesign (Random/Artists/Favourites/Browse + shuffle-all row), voice
+      search (was actively broken — blank-id crash), disk caches (tree SWR + quota-sized audio),
+      always-transcode AAC-256-over-HLS, seven-bug review batch (prefListener guard, resumption
+      empty-pref, 4× AlbumArtContentProvider, sendLogs deadlock), Gradle wrapper committed,
+      **Dorsal rebrand** (`elizardbeth.dorsal`, identity derived from applicationId everywhere).
+- [x] Settled by verification (2026-07-06): `currentTrack`/`currentPlaybackTime` race and
+      `resolveParentTracks` player-thread access are non-issues (everything runs on main —
+      confirmed from concurrent-futures-ktx 1.3.0 bytecode); partial-cache HLS replay cannot fail
+      mid-track (cached playlists carry no session ids — verified against real cached payloads
+      from the emulator + Jellyfin server source); resumption `IllegalSeekPositionException`
+      claim refuted (media3 catches it); null-Snackbar claim unresolved (conflicting verdicts),
+      not tracked.
+- Owner decisions on record: no upstreaming/publishing (fork is personal); no PR/issues to
+  upstream for now — car first; transcode-always stays the default behavior; "Dorsal" chosen as
+  the app name (2026-07-05).
