@@ -76,8 +76,6 @@ dependencies {
     // On the runtime classpath transitively via the Jellyfin SDK, but not visible at compile time.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("com.google.dagger:hilt-android:2.59.2")
-    implementation("org.slf4j:slf4j-api:2.0.17")
-    implementation("org.slf4j:slf4j-android:1.7.36")
     ksp("com.google.dagger:hilt-compiler:2.59.2")
 
     testImplementation("junit:junit:4.13.2")
