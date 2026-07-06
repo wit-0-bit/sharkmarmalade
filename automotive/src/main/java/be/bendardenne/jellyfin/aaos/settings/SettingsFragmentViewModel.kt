@@ -1,5 +1,6 @@
 package be.bendardenne.jellyfin.aaos.settings
 
+import android.util.Log
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -67,7 +68,7 @@ class SettingsFragmentViewModel
 
                     exited
                 } catch (e: Exception) {
-                    logUploadStatus.postValue(e.message)
+                    logUploadStatus.postValue(e.message ?: "Failed to collect logs")
                     return@withContext
                 }
 
@@ -81,9 +82,15 @@ class SettingsFragmentViewModel
                     return@withContext
                 }
 
-                val response = api.clientLogApi.logFile(content)
-
-                logUploadStatus.postValue("Uploaded ${response.content.fileName}")
+                try {
+                    val response = api.clientLogApi.logFile(content)
+                    logUploadStatus.postValue("Uploaded ${response.content.fileName}")
+                } catch (e: Exception) {
+                    // Expired token / dropped connection: report it instead of letting the
+                    // failure propagate uncaught (there is no CoroutineExceptionHandler).
+                    Log.w(LOG_MARKER, "Log upload failed", e)
+                    logUploadStatus.postValue(e.message ?: "Log upload failed")
+                }
             }
 
         }
