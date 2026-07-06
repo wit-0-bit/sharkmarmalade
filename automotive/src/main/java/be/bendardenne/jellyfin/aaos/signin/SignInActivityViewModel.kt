@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import be.bendardenne.jellyfin.aaos.JellyfinAccountManager
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -98,6 +99,8 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
                         if (pollQuickConnect(api, serverUrl)) {
                             break
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         // A transient network blip (or a code that has expired) must not crash
                         // the sign-in screen. Keep polling; a real expiry just never succeeds
@@ -105,6 +108,9 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
                         Log.w(LOG_MARKER, "QuickConnect poll failed, will retry", e)
                     }
                 }
+            } catch (e: CancellationException) {
+                // The screen is being torn down (e.g. after a successful login); let it cancel.
+                throw e
             } catch (e: Exception) {
                 Log.w(LOG_MARKER, "QuickConnect unavailable", e)
                 _quickConnectCode.value = null

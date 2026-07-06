@@ -245,6 +245,10 @@ class JellyfinMediaLibrarySessionCallback(
     // Maps a fetch failure to a distinguishable result instead of an opaque failed future: an
     // expired token (HTTP 401) routes the user back to sign-in; anything else is a generic error.
     private fun <T : Any> errorResult(e: Exception): LibraryResult<T> {
+        // Never swallow coroutine cancellation (e.g. the browser disconnecting mid-fetch).
+        if (e is kotlinx.coroutines.CancellationException) {
+            throw e
+        }
         if (e is InvalidStatusException && e.status == 401) {
             return authErrorResult()
         }
