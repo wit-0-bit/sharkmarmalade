@@ -43,6 +43,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import org.jellyfin.sdk.api.client.ApiClient
+import org.jellyfin.sdk.api.client.exception.InvalidStatusException
 import org.jellyfin.sdk.api.client.extensions.userLibraryApi
 import org.jellyfin.sdk.model.serializer.toUUID
 import kotlin.collections.listOf
@@ -193,20 +194,18 @@ class JellyfinMediaLibrarySessionCallback(
     ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
         Log.i(LOG_MARKER, "onGetChildren $parentId")
         if (!accountManager.isAuthenticated) {
-            return Futures.immediateFuture(
-                LibraryResult.ofError(
-                    SessionError(
-                        SessionError.ERROR_SESSION_AUTHENTICATION_EXPIRED,
-                        service.getString(R.string.sign_in_to_your_jellyfin_server)
-                    ),
-                    MediaLibraryService.LibraryParams.Builder()
-                        .setExtras(authenticationExtras()).build()
-                )
-            )
+            return Futures.immediateFuture(authErrorResult())
         }
+        ensureTree()
 
         return SuspendToFutureAdapter.launchFuture {
-            LibraryResult.ofItemList(tree.getChildren(parentId), params)
+            try {
+                val children = paginate(tree.getChildren(parentId), page, pageSize)
+                LibraryResult.ofItemList(children, params)
+            } catch (e: Exception) {
+                Log.w(LOG_MARKER, "onGetChildren failed for $parentId", e)
+                errorResult(e)
+            }
         }
     }
 
@@ -232,17 +231,71 @@ class JellyfinMediaLibrarySessionCallback(
         }
     }
 
+    private fun <T : Any> authErrorResult(): LibraryResult<T> {
+        return LibraryResult.ofError<T>(
+            SessionError(
+                SessionError.ERROR_SESSION_AUTHENTICATION_EXPIRED,
+                service.getString(R.string.sign_in_to_your_jellyfin_server)
+            ),
+            MediaLibraryService.LibraryParams.Builder()
+                .setExtras(authenticationExtras()).build()
+        )
+    }
+
+    // Maps a fetch failure to a distinguishable result instead of an opaque failed future: an
+    // expired token (HTTP 401) routes the user back to sign-in; anything else is a generic error.
+    private fun <T : Any> errorResult(e: Exception): LibraryResult<T> {
+        if (e is InvalidStatusException && e.status == 401) {
+            return authErrorResult()
+        }
+        return LibraryResult.ofError<T>(
+            SessionError(SessionError.ERROR_UNKNOWN, service.getString(R.string.could_not_load)),
+            MediaLibraryService.LibraryParams.Builder().build()
+        )
+    }
+
+    // The car host asks for children/search results a page at a time; honour page/pageSize instead
+    // of returning the same full list for every page (which reads as duplicates to a paging host).
+    private fun <T> paginate(items: List<T>, page: Int, pageSize: Int): List<T> {
+        if (pageSize <= 0 || pageSize == Int.MAX_VALUE) {
+            return items
+        }
+        val start = page.coerceAtLeast(0).toLong() * pageSize
+        if (start >= items.size) {
+            return emptyList()
+        }
+        val from = start.toInt()
+        val to = minOf(items.size.toLong(), start + pageSize).toInt()
+        return items.subList(from, to)
+    }
+
+    // An empty resolved queue must never be applied: setMediaItems(emptyList) wipes the live queue
+    // and saving it destroys resumption state. Failing the request makes media3's stub ignore it,
+    // keeping both intact (the same protection the voice-search path already uses).
+    private fun requireNonEmpty(items: List<MediaItem>): List<MediaItem> {
+        if (items.isEmpty()) {
+            throw UnsupportedOperationException("Resolved to an empty queue")
+        }
+        return items
+    }
+
     override fun onGetItem(
         session: MediaLibraryService.MediaLibrarySession,
         browser: MediaSession.ControllerInfo,
         mediaId: String,
     ): ListenableFuture<LibraryResult<MediaItem>> {
         Log.i(LOG_MARKER, "onGetItem $mediaId")
+        if (!accountManager.isAuthenticated) {
+            return Futures.immediateFuture(authErrorResult())
+        }
+        ensureTree()
         return SuspendToFutureAdapter.launchFuture {
-            LibraryResult.ofItem(
-                tree.getItem(mediaId),
-                null
-            )
+            try {
+                LibraryResult.ofItem(tree.getItem(mediaId), null)
+            } catch (e: Exception) {
+                Log.w(LOG_MARKER, "onGetItem failed for $mediaId", e)
+                errorResult(e)
+            }
         }
     }
 
@@ -296,7 +349,7 @@ class JellyfinMediaLibrarySessionCallback(
             }
 
             if (isPlayAll(mediaItems)) {
-                val resolvedItems = resolvePlayAll(mediaSession, mediaItems[0].mediaId)
+                val resolvedItems = requireNonEmpty(resolvePlayAll(mediaSession, mediaItems[0].mediaId))
                 savePlaylist(resolvedItems)
                 // For the shuffled (artist) flavour, an explicit start index would override
                 // shuffle order: INDEX_UNSET lets the player start at the shuffle order's first
@@ -318,7 +371,7 @@ class JellyfinMediaLibrarySessionCallback(
 
             if (isSingleItemWithParent(mediaItems)) {
                 val singleItem = mediaItems[0]
-                val resolvedItems = expandSingleItem(singleItem)
+                val resolvedItems = requireNonEmpty(expandSingleItem(singleItem))
 
                 val mediaItemsWithStartPosition = MediaSession.MediaItemsWithStartPosition(
                     resolvedItems,
@@ -329,7 +382,7 @@ class JellyfinMediaLibrarySessionCallback(
                 return@launchFuture mediaItemsWithStartPosition
             }
 
-            val resolvedItems = resolveMediaItems(mediaItems)
+            val resolvedItems = requireNonEmpty(resolveMediaItems(mediaItems))
             val mediaItemsWithStartPosition = MediaSession.MediaItemsWithStartPosition(
                 resolvedItems,
                 startIndex,
@@ -603,10 +656,19 @@ class JellyfinMediaLibrarySessionCallback(
         query: String,
         params: MediaLibraryService.LibraryParams?
     ): ListenableFuture<LibraryResult<Void>> {
+        if (!accountManager.isAuthenticated) {
+            return Futures.immediateFuture(authErrorResult())
+        }
+        ensureTree()
         return SuspendToFutureAdapter.launchFuture {
-            val results = tree.search(query).size
-            session.notifySearchResultChanged(browser, query, results, params)
-            LibraryResult.ofVoid(params)
+            try {
+                val results = tree.search(query).size
+                session.notifySearchResultChanged(browser, query, results, params)
+                LibraryResult.ofVoid(params)
+            } catch (e: Exception) {
+                Log.w(LOG_MARKER, "onSearch failed for $query", e)
+                errorResult(e)
+            }
         }
     }
 
@@ -618,9 +680,18 @@ class JellyfinMediaLibrarySessionCallback(
         pageSize: Int,
         params: MediaLibraryService.LibraryParams?
     ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+        if (!accountManager.isAuthenticated) {
+            return Futures.immediateFuture(authErrorResult())
+        }
+        ensureTree()
         return SuspendToFutureAdapter.launchFuture {
-            val results = tree.search(query)
-            LibraryResult.ofItemList(results, params)
+            try {
+                val results = paginate(tree.search(query), page, pageSize)
+                LibraryResult.ofItemList(results, params)
+            } catch (e: Exception) {
+                Log.w(LOG_MARKER, "onGetSearchResult failed for $query", e)
+                errorResult(e)
+            }
         }
     }
 
@@ -686,13 +757,24 @@ class JellyfinMediaLibrarySessionCallback(
         mediaId: String,
         rating: Rating
     ): ListenableFuture<SessionResult> {
-        Log.i(LOG_MARKER, "onSetRating ${(rating as HeartRating).isHeart}")
+        // The session only supports heart (favourite) ratings. A controller can send other Rating
+        // types; casting them unchecked would crash on the main thread, so skip instead.
+        if (rating !is HeartRating) {
+            Log.w(LOG_MARKER, "Ignoring unsupported rating type ${rating.javaClass.simpleName}")
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_INFO_SKIPPED))
+        }
+        Log.i(LOG_MARKER, "onSetRating ${rating.isHeart}")
 
-        val item = session.player.currentMediaItem
-        item?.let {
-            val metadata = it.mediaMetadata.buildUpon().setUserRating(rating).build()
-            val mediaItem = it.buildUpon().setMediaMetadata(metadata).build()
-            session.player.replaceMediaItem(session.player.currentMediaItemIndex, mediaItem)
+        // Update the queued item whose id matches the rated one, not whichever item happens to be
+        // playing (rating a non-current track otherwise toggled the heart on the wrong track).
+        val player = session.player
+        for (i in 0 until player.mediaItemCount) {
+            val queued = player.getMediaItemAt(i)
+            if (queued.mediaId == mediaId) {
+                val metadata = queued.mediaMetadata.buildUpon().setUserRating(rating).build()
+                player.replaceMediaItem(i, queued.buildUpon().setMediaMetadata(metadata).build())
+                break
+            }
         }
 
         return SuspendToFutureAdapter.launchFuture {
