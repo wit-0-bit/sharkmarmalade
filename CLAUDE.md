@@ -136,12 +136,20 @@ disproven against media3 1.9.2 bytecode.) Before this feature, the blank id cras
 `"".toUUID()` — voice play was actively broken, not just missing.
 
 Resolution (`searchQueryOrNull`/`resolveSearch`/`rankSearchResults`): ranked matching over
-`tree.search()` — artist > album > playlist > track, exact-then-contains, focus-extra-biased;
-winners resolving to zero tracks fall through to the next candidate; artist winners reuse the
-shuffle-all plumbing (`resolveParentTracks`); blank queries play one random album; a no-match
-query **throws** so media3 ignores the failed future — a misheard query can't wipe the live queue
-or saved resumption state. `ensureTree()` guards voice/resumption arriving on a cold process.
-Verified at source level; still needs a real-Assistant end-to-end test in the car.
+`tree.search()` — artist > album > playlist > track, exact-then-contains, **type-biased**. The
+requested type comes from either a **spoken keyword** parsed off the front of the query
+(`parseTypeQualifier`: "play **album** Polygondwanaland", "play **song** X", also artist/playlist —
+the keyword is stripped before searching) **or** Assistant's `EXTRA_MEDIA_FOCUS` extra
+(`focusTypeFromExtra`), keyword winning. It only *biases* ranking, not filters — winners resolving
+to zero tracks fall through to the next candidate, so a mis-heard/absent type still plays something.
+Artist winners reuse the shuffle-all plumbing (`resolveParentTracks`); track winners play just that
+track (they carry a `SINGLE:` id — see the browse-tree note); blank queries play one random album; a
+no-match query **throws** so media3 ignores the failed future — a misheard query can't wipe the live
+queue or saved resumption state. `ensureTree()` guards voice/resumption arriving on a cold process.
+Verified at source level; still needs a real-Assistant end-to-end test in the car (open question:
+whether Assistant passes the keyword through in `searchQuery` or pre-strips it and sets the focus
+extra — the code handles both, and a leading article like "the album X" is the one phrasing not yet
+handled).
 
 ### Caching
 

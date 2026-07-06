@@ -500,10 +500,17 @@ class JellyfinMediaLibrarySessionCallback(
             return searchResultOf(session, resolveParentTracks(session, album.mediaId))
         }
 
-        val focus = extras?.getString(MediaStore.EXTRA_MEDIA_FOCUS)
-        val candidates = rankSearchResults(trimmed, tree.search(trimmed), focus)
+        // Honour an explicit spoken type qualifier ("play album X", "play song X", "play artist X",
+        // "play playlist X"). Assistant *may* set EXTRA_MEDIA_FOCUS, but it isn't guaranteed in the
+        // car, so also parse a leading keyword from the query text and strip it before searching. A
+        // parsed keyword wins over the extra; either way it only biases ranking toward that type,
+        // with the fallback loop below still covering a mis-heard type.
+        val (typeFromText, searchTerm) = parseTypeQualifier(trimmed)
+        val focusType = typeFromText ?: focusTypeFromExtra(extras)
+
+        val candidates = rankSearchResults(searchTerm, tree.search(searchTerm), focusType)
         if (candidates.isEmpty()) {
-            return emptySearchResult("no results for \"$trimmed\" (focus=$focus)")
+            return emptySearchResult("no results for \"$searchTerm\" (focusType=$focusType)")
         }
 
         // A winner can resolve to zero tracks (e.g. an empty playlist whose title matches the
@@ -513,8 +520,8 @@ class JellyfinMediaLibrarySessionCallback(
             if (result.mediaItems.isNotEmpty()) {
                 Log.i(
                     LOG_MARKER,
-                    "Voice search: \"$trimmed\" (focus=$focus) -> " +
-                            "\"${winner.mediaMetadata.title}\" " +
+                    "Voice search: \"$trimmed\" (searchTerm=\"$searchTerm\", focusType=$focusType) " +
+                            "-> \"${winner.mediaMetadata.title}\" " +
                             "(mediaType=${winner.mediaMetadata.mediaType})"
                 )
                 return result
@@ -527,8 +534,39 @@ class JellyfinMediaLibrarySessionCallback(
         }
 
         return emptySearchResult(
-            "all results for \"$trimmed\" resolved to zero tracks (focus=$focus)"
+            "all results for \"$searchTerm\" resolved to zero tracks (focusType=$focusType)"
         )
+    }
+
+    // Maps Assistant's EXTRA_MEDIA_FOCUS content type to our MediaMetadata media type, or null.
+    private fun focusTypeFromExtra(extras: Bundle?): Int? {
+        return when (extras?.getString(MediaStore.EXTRA_MEDIA_FOCUS)) {
+            MediaStore.Audio.Artists.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_ARTIST
+            MediaStore.Audio.Albums.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_ALBUM
+            "vnd.android.cursor.item/playlist" -> MediaMetadata.MEDIA_TYPE_PLAYLIST
+            MediaStore.Audio.Media.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_MUSIC
+            else -> null
+        }
+    }
+
+    // Parses a leading spoken type qualifier so "album Polygondwanaland" targets albums and
+    // "song X" targets tracks. Returns the media type (or null when there's no keyword) and the
+    // query with the keyword stripped. Only strips when a non-empty remainder follows, so a bare
+    // "album" stays a literal query.
+    private fun parseTypeQualifier(query: String): Pair<Int?, String> {
+        val firstWord = query.substringBefore(' ', "").lowercase()
+        val rest = query.substringAfter(' ', "").trim()
+        if (rest.isEmpty()) {
+            return null to query
+        }
+        val type = when (firstWord) {
+            "album", "albums" -> MediaMetadata.MEDIA_TYPE_ALBUM
+            "song", "songs", "track", "tracks" -> MediaMetadata.MEDIA_TYPE_MUSIC
+            "artist", "artists", "band" -> MediaMetadata.MEDIA_TYPE_ARTIST
+            "playlist", "playlists" -> MediaMetadata.MEDIA_TYPE_PLAYLIST
+            else -> null
+        }
+        return if (type != null) type to rest else null to query
     }
 
     /**
@@ -579,23 +617,16 @@ class JellyfinMediaLibrarySessionCallback(
 
     /**
      * Ranks the search results by play-worthiness: title matches in category order (artist >
-     * album > playlist > track, with Assistant's media-focus category boosted to the front when
-     * present, and exact title matches beating contains-matches within a category), then any
-     * artist, then anything playable, then anything at all.
+     * album > playlist > track, with the requested type — spoken keyword or Assistant's
+     * media-focus — boosted to the front when present, and exact title matches beating
+     * contains-matches within a category), then any artist, then anything playable, then anything
+     * at all.
      */
     private fun rankSearchResults(
         query: String,
         results: List<MediaItem>,
-        focus: String?
+        focusType: Int?
     ): List<MediaItem> {
-        val focusType = when (focus) {
-            MediaStore.Audio.Artists.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_ARTIST
-            MediaStore.Audio.Albums.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_ALBUM
-            "vnd.android.cursor.item/playlist" -> MediaMetadata.MEDIA_TYPE_PLAYLIST
-            MediaStore.Audio.Media.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_MUSIC
-            else -> null
-        }
-
         val categories = listOf(
             MediaMetadata.MEDIA_TYPE_ARTIST,
             MediaMetadata.MEDIA_TYPE_ALBUM,

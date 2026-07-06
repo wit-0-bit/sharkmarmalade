@@ -92,6 +92,8 @@ Two passes:
   - Favourites gained a pinned **"Play all favourites"** row (in order), like Artists' shuffle-all,
     shown only when the list has loose tracks.
 
-  One consequence to eyeball in the car: **voice search for a specific song now plays just that
-  song** (it shares the search path), rather than the song in its album. Say the word if you'd
-  rather voice kept the album context.
+  Voice search shares this path, and now honours a **spoken type keyword**: "play **album**
+  Polygondwanaland" targets albums, "play **song** X" plays just that track (also artist/playlist).
+  Falls back gracefully if the type is absent/mis-heard. Real-Assistant behaviour in the car is the
+  open question — whether it passes the keyword through or pre-strips it and sets the focus extra
+  (the code handles both).
