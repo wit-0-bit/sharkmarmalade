@@ -26,7 +26,18 @@ class AlbumArtContentProvider : ContentProvider() {
     private val client = OkHttpClient()
 
     companion object {
-        private val uriMap = mutableMapOf<Uri, Uri>()
+        private const val URI_MAP_MAX_ENTRIES = 2000
+
+        // Bounded, evicting map from our own content:// uris to the remote (Jellyfin) uri they
+        // were resolved from. Access must always go through the synchronized helpers below, as
+        // this is written from mapUri() (called from whatever thread resolves the art) and read
+        // from openFile() (ContentProvider binder threads, potentially concurrently).
+        private val uriMap = object : LinkedHashMap<Uri, Uri>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Uri, Uri>?): Boolean {
+                return size > URI_MAP_MAX_ENTRIES
+            }
+        }
+
         private val inProgress = HashMap<Uri, CountDownLatch>()
 
         fun mapUri(uri: Uri): Uri {
@@ -36,16 +47,20 @@ class AlbumArtContentProvider : ContentProvider() {
                 .authority("be.bendardenne.jellyfin.aaos")
                 .path(path)
                 .build()
-            uriMap[contentUri] = uri
+            synchronized(uriMap) {
+                uriMap[contentUri] = uri
+            }
             return contentUri
         }
+
+        private fun getMappedUri(uri: Uri): Uri? = synchronized(uriMap) { uriMap[uri] }
     }
 
     override fun onCreate() = true
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val context = this.context ?: return null
-        val remoteUri = uriMap[uri] ?: throw FileNotFoundException(uri.path)
+        val remoteUri = getMappedUri(uri) ?: throw FileNotFoundException(uri.path)
         val file = File(context.cacheDir, uri.path)
 
         if (file.exists()) {
@@ -54,47 +69,81 @@ class AlbumArtContentProvider : ContentProvider() {
         }
 
         // Several threads may request the same image (typical when listing an album).
-        // To avoid firing multiple downloads, the first thread makes the request, others will wait.
+        // To avoid firing multiple downloads, the first thread makes the request, others will
+        // wait. The synchronized section below only ever does the quick "claim or join" check;
+        // the actual (potentially long) waiting/downloading happens after it is released, so
+        // unrelated URIs are never blocked behind this one.
+        var latch: CountDownLatch? = null
+        var isDownloader = false
         synchronized(inProgress) {
-            if (inProgress.contains(remoteUri)) {
-                Log.d(LOG_MARKER, "Waiting for image download in separate thread... $remoteUri")
-                inProgress.get(remoteUri)?.await(15, TimeUnit.SECONDS)
-                Log.d(LOG_MARKER, "... Available!")
-                return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val existing = inProgress[remoteUri]
+            if (existing != null) {
+                latch = existing
+            } else {
+                // Any other thread will now see a countdownlatch and wait for it.
+                // This thread will continue and download.
+                val newLatch = CountDownLatch(1)
+                inProgress[remoteUri] = newLatch
+                latch = newLatch
+                isDownloader = true
             }
+        }
 
-            // Any other thread will now see a countdownlatch and block.
-            // This thread will continue and download.
-            inProgress.put(remoteUri, CountDownLatch(1))
+        if (!isDownloader) {
+            Log.d(LOG_MARKER, "Waiting for image download in separate thread... $remoteUri")
+            latch!!.await(15, TimeUnit.SECONDS)
+            // The download this thread was waiting on may have failed (or timed out), in which
+            // case there is genuinely no art available for this item.
+            return if (file.exists()) {
+                Log.d(LOG_MARKER, "... Available!")
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            } else {
+                Log.d(LOG_MARKER, "... Not available.")
+                null
+            }
         }
 
         val tmpFile = File.createTempFile("sharkmarmalade-albumart", ".png", context.cacheDir)
-        val request: Request = Request.Builder()
-            .url(remoteUri.toString())
-            .build()
+        var success = false
+        try {
+            val request: Request = Request.Builder()
+                .url(remoteUri.toString())
+                .build()
 
-        Log.d(LOG_MARKER, "Downloading $remoteUri ...")
-        client.newCall(request).execute().use {
-            if (it.body != null && it.code == 200) {
-                Log.d(LOG_MARKER, "Downloaded $remoteUri")
-                val source = it.body!!.source()
-                source.request(Long.MAX_VALUE)
+            Log.d(LOG_MARKER, "Downloading $remoteUri ...")
+            client.newCall(request).execute().use {
+                if (it.body != null && it.code == 200) {
+                    Log.d(LOG_MARKER, "Downloaded $remoteUri")
+                    val source = it.body!!.source()
+                    source.request(Long.MAX_VALUE)
 
-                val sink = tmpFile.sink().buffer()
-                sink.writeAll(source)
-                sink.flush()
-                sink.close()
+                    val sink = tmpFile.sink().buffer()
+                    sink.writeAll(source)
+                    sink.flush()
+                    sink.close()
 
-                tmpFile.renameTo(file)
-            } else {
-                Log.w(LOG_MARKER, "Failed to download $remoteUri: \n ${it.code} - ${it.body}")
+                    success = tmpFile.renameTo(file)
+                } else {
+                    Log.w(LOG_MARKER, "Failed to download $remoteUri: \n ${it.code} - ${it.body}")
+                }
             }
-
-            inProgress.get(remoteUri)?.countDown()
-            inProgress.remove(remoteUri)
+        } catch (e: Exception) {
+            Log.w(LOG_MARKER, "Failed to download $remoteUri", e)
+        } finally {
+            if (!success) {
+                tmpFile.delete()
+            }
+            synchronized(inProgress) {
+                inProgress.remove(remoteUri)
+            }
+            latch!!.countDown()
         }
 
-        return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        return if (success) {
+            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        } else {
+            null
+        }
     }
 
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null

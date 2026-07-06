@@ -38,22 +38,49 @@ class SettingsFragmentViewModel
                 api.auth(accountManager)
 
 
-                val process = try {
-                    Runtime.getRuntime().exec("logcat -t 500 -s $LOG_MARKER").also {
-                        it.waitFor(10, TimeUnit.SECONDS)
+                var content = ""
+                var stderr = ""
+
+                val processExited = try {
+                    val process = Runtime.getRuntime().exec("logcat -t 500 -s $LOG_MARKER")
+
+                    // Drain stdout and stderr concurrently on separate threads. Reading
+                    // them one after another can deadlock: if the unread stream's OS
+                    // pipe buffer fills up, the child blocks writing to it and never
+                    // exits, so the other stream's read never reaches EOF either.
+                    val stdoutThread = Thread {
+                        content = process.inputStream.bufferedReader().use(BufferedReader::readText)
+                    }.apply { start() }
+                    val stderrThread = Thread {
+                        stderr = process.errorStream.bufferedReader().use(BufferedReader::readText)
+                    }.apply { start() }
+
+                    val exited = process.waitFor(10, TimeUnit.SECONDS)
+                    if (!exited) {
+                        // Force the process to terminate so the reader threads (which
+                        // may still be blocked reading) can reach EOF and finish.
+                        process.destroyForcibly()
                     }
+
+                    stdoutThread.join()
+                    stderrThread.join()
+
+                    exited
                 } catch (e: Exception) {
                     logUploadStatus.postValue(e.message)
                     return@withContext
                 }
 
-                val stderr = process.errorStream.bufferedReader().use(BufferedReader::readText)
+                if (!processExited) {
+                    logUploadStatus.postValue("Timed out waiting for logs to be collected")
+                    return@withContext
+                }
+
                 if (!Strings.isNullOrEmpty(stderr)) {
                     logUploadStatus.postValue(stderr)
                     return@withContext
                 }
 
-                val content = process.inputStream.bufferedReader().use(BufferedReader::readText)
                 val response = api.clientLogApi.logFile(content)
 
                 logUploadStatus.postValue("Uploaded ${response.content.fileName}")

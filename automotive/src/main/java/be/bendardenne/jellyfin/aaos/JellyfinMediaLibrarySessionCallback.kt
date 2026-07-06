@@ -71,6 +71,11 @@ class JellyfinMediaLibrarySessionCallback(
             if (key == PREF_ALBUM_BEHAVIOUR || key == PREF_BITRATE) {
                 Log.i(LOG_MARKER, "Preferences invalidated")
 
+                if (!::tree.isInitialized) {
+                    Log.d(LOG_MARKER, "Tree not initialized yet, ignoring preference change")
+                    return@OnSharedPreferenceChangeListener
+                }
+
                 // Clear the item cache on any setting impacting the media items.
                 tree.evictCache()
                 // And force Sessions to refetch the new items.
@@ -344,6 +349,7 @@ class JellyfinMediaLibrarySessionCallback(
             val mediaItemsToRestore = prefs
                 .getString(PLAYLIST_IDS_PREF, "")
                 ?.split(",")
+                ?.filter { it.isNotBlank() }
                 ?.map { async { tree.getItem(it) } }
                 ?.awaitAll() ?: listOf()
 
