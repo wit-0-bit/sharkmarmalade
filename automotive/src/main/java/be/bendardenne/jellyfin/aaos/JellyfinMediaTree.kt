@@ -1,6 +1,7 @@
 package be.bendardenne.jellyfin.aaos
 
 import android.content.Context
+import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_ARTIST
 import androidx.media3.common.MediaMetadata.MEDIA_TYPE_PLAYLIST
@@ -9,8 +10,13 @@ import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.LATEST_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAYLISTS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.RANDOM_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
+import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.artistsApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
@@ -21,6 +27,7 @@ import org.jellyfin.sdk.model.api.ItemFilter
 import org.jellyfin.sdk.model.api.ItemSortBy
 import org.jellyfin.sdk.model.api.SortOrder
 import org.jellyfin.sdk.model.serializer.toUUID
+import java.util.concurrent.ConcurrentHashMap
 
 class JellyfinMediaTree(
     private val context: Context,
@@ -29,9 +36,20 @@ class JellyfinMediaTree(
     private val maxItemsPerPage: Int = 120
 ) {
 
+    companion object {
+        private const val REVALIDATION_INTERVAL_MS = 30_000L
+    }
+
     private val mediaItems: Cache<String, MediaItem> = CacheBuilder.newBuilder()
         .maximumSize(1000)
         .build()
+
+    private val diskCache = MediaTreeDiskCache(context, api)
+    private val revalidationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lastRevalidated = ConcurrentHashMap<String, Long>()
+    private val revalidationsInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    var onChildrenUpdated: ((parentId: String, itemCount: Int) -> Unit)? = null
 
     suspend fun getItem(id: String): MediaItem {
         if (mediaItems.getIfPresent(id) == null) {
@@ -43,8 +61,16 @@ class JellyfinMediaTree(
                 FAVOURITES -> itemFactory.favourites()
                 PLAYLISTS -> itemFactory.playlists()
                 else -> {
-                    val response = api.userLibraryApi.getItem(id.toUUID())
-                    itemFactory.create(response.content)
+                    // Stream URLs / art URIs are rebuilt by the factory on every create().
+                    val cached = diskCache.readItem(id)
+                    val dto = cached
+                        ?: api.userLibraryApi.getItem(id.toUUID()).content.also {
+                            revalidationScope.launch { diskCache.writeItem(it) }
+                        }
+                    if (cached != null) {
+                        revalidateItem(id)
+                    }
+                    itemFactory.create(dto)
                 }
             }
 
@@ -63,27 +89,149 @@ class JellyfinMediaTree(
                 getItem(PLAYLISTS)
             )
 
-            LATEST_ALBUMS -> getLatestAlbums()
+            LATEST_ALBUMS -> childrenWithCache(id, ::fetchLatestAlbums, ::buildItems)
             RANDOM_ALBUMS -> getRandomAlbums()
-            FAVOURITES -> getFavourite()
-            PLAYLISTS -> getPlaylists()
+            FAVOURITES -> childrenWithCache(id, ::fetchFavourites, ::buildFavouriteItems)
+            PLAYLISTS -> childrenWithCache(id, ::fetchPlaylists, ::buildItems)
             else -> getItemChildren(id)
         }
     }
 
-    private suspend fun getLatestAlbums(): List<MediaItem> {
-        val response = api.userLibraryApi.getLatestMedia(
-            includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
-            limit = maxItemsPerPage
-        )
+    /**
+     * Serves cached children from disk immediately (revalidating in the background), or fetches
+     * and caches them on a miss.
+     */
+    private suspend fun childrenWithCache(
+        key: String,
+        fetch: suspend () -> List<BaseItemDto>,
+        build: (List<BaseItemDto>) -> List<MediaItem>
+    ): List<MediaItem> {
+        val cached = diskCache.readChildren(key)
 
-        return response.content.map {
+        if (cached == null) {
+            val fresh = fetch()
+            revalidationScope.launch { persist(key, fresh) }
+            return build(fresh)
+        }
+
+        revalidate(key, cached, fetch)
+        return build(cached)
+    }
+
+    private suspend fun persist(key: String, dtos: List<BaseItemDto>): Boolean {
+        val persisted = diskCache.writeChildren(key, dtos)
+        // Persist tracks individually so playback resumption works from disk after a restart.
+        dtos.filter { it.type == BaseItemKind.AUDIO }.forEach { diskCache.writeItem(it) }
+        return persisted
+    }
+
+    private fun revalidate(
+        key: String,
+        cached: List<BaseItemDto>,
+        fetch: suspend () -> List<BaseItemDto>
+    ) {
+        val last = lastRevalidated[key]
+        if (last != null && System.currentTimeMillis() - last < REVALIDATION_INTERVAL_MS) {
+            return
+        }
+
+        if (!revalidationsInFlight.add(key)) {
+            return
+        }
+
+        revalidationScope.launch {
+            try {
+                val fresh = fetch()
+                lastRevalidated[key] = System.currentTimeMillis()
+                // Fresh data is written before the notify fires, so the host's refetch reads
+                // fresh data and the next revalidation is both throttled and
+                // fingerprint-identical — no notify loop. If the write failed, the host's
+                // refetch would only re-read stale disk data, so don't notify at all.
+                if (!persist(key, fresh)) {
+                    return@launch
+                }
+                if (cached.map(::fingerprint) != fresh.map(::fingerprint)) {
+                    onChildrenUpdated?.invoke(key, fresh.size)
+                }
+            } catch (e: Exception) {
+                // The user keeps the stale list.
+                Log.d(LOG_MARKER, "Revalidation failed for $key", e)
+            } finally {
+                revalidationsInFlight.remove(key)
+            }
+        }
+    }
+
+    // There is no per-item notify in the browse protocol, so a changed DTO only updates the disk
+    // cache and the in-memory item; hosts pick it up on their next fetch.
+    private fun revalidateItem(id: String) {
+        val key = "item:$id"
+        val last = lastRevalidated[key]
+        if (last != null && System.currentTimeMillis() - last < REVALIDATION_INTERVAL_MS) {
+            return
+        }
+
+        if (!revalidationsInFlight.add(key)) {
+            return
+        }
+
+        revalidationScope.launch {
+            try {
+                val fresh = api.userLibraryApi.getItem(id.toUUID()).content
+                lastRevalidated[key] = System.currentTimeMillis()
+                if (diskCache.writeItem(fresh)) {
+                    mediaItems.put(id, itemFactory.create(fresh))
+                }
+            } catch (e: Exception) {
+                // The user keeps the stale item.
+                Log.d(LOG_MARKER, "Revalidation failed for $key", e)
+            } finally {
+                revalidationsInFlight.remove(key)
+            }
+        }
+    }
+
+    // Deliberately not full DTO equality: playCount/lastPlayedDate churn on every play and must
+    // not trigger UI refreshes.
+    private fun fingerprint(dto: BaseItemDto) = "${dto.id}|${dto.name}|${dto.userData?.isFavorite}"
+
+    private fun buildItems(dtos: List<BaseItemDto>): List<MediaItem> {
+        return dtos.map {
             val item = itemFactory.create(it)
             mediaItems.put(item.mediaId, item)
             item
         }
     }
 
+    private fun buildFavouriteItems(dtos: List<BaseItemDto>): List<MediaItem> {
+        return dtos.map {
+            val item = itemFactory.create(
+                it,
+                groupForItem(it),
+                parent = FAVOURITES
+            )
+            mediaItems.put(item.mediaId, item)
+            item
+        }
+    }
+
+    private fun buildChildItems(parentId: String, dtos: List<BaseItemDto>): List<MediaItem> {
+        return dtos.map {
+            val item = itemFactory.create(it, parent = parentId)
+            mediaItems.put(item.mediaId, item)
+            item
+        }
+    }
+
+    private suspend fun fetchLatestAlbums(): List<BaseItemDto> {
+        return api.userLibraryApi.getLatestMedia(
+            includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
+            limit = maxItemsPerPage
+        ).content
+    }
+
+    // Deliberately not disk-cached: a Random tab that silently reshuffles under the user is worse
+    // than a spinner, and caching randomness defeats its purpose.
     private suspend fun getRandomAlbums(): List<MediaItem> {
         val response = api.itemsApi.getItems(
             includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
@@ -99,25 +247,19 @@ class JellyfinMediaTree(
         }
     }
 
-    private suspend fun getPlaylists(): List<MediaItem> {
-        val response = api.itemsApi.getItems(
+    private suspend fun fetchPlaylists(): List<BaseItemDto> {
+        return api.itemsApi.getItems(
             includeItemTypes = listOf(BaseItemKind.PLAYLIST),
             recursive = true,
             sortOrder = listOf(SortOrder.DESCENDING),
             sortBy = listOf(ItemSortBy.DATE_CREATED),
             limit = maxItemsPerPage
-        )
-
-        return response.content.items.map {
-            val item = itemFactory.create(it)
-            mediaItems.put(item.mediaId, item)
-            item
-        }
+        ).content.items
     }
 
     private suspend fun getItemChildren(id: String): List<MediaItem> {
         if (getItem(id).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST) {
-            return getArtistAlbums(id)
+            return childrenWithCache(id, { fetchArtistAlbums(id) }, ::buildItems)
         }
 
         var sortBy = listOf(
@@ -131,20 +273,18 @@ class JellyfinMediaTree(
             sortBy = listOf(ItemSortBy.DEFAULT)
         }
 
-        val response = api.itemsApi.getItems(
-            sortBy = sortBy,
-            parentId = id.toUUID()
-        )
-
-        return response.content.items.map {
-            val item = itemFactory.create(it, parent = id)
-            mediaItems.put(item.mediaId, item)
-            item
-        }
+        return childrenWithCache(id, { fetchItemChildren(id, sortBy) }) { buildChildItems(id, it) }
     }
 
-    private suspend fun getArtistAlbums(id: String): List<MediaItem> {
-        val response = api.itemsApi.getItems(
+    private suspend fun fetchItemChildren(id: String, sortBy: List<ItemSortBy>): List<BaseItemDto> {
+        return api.itemsApi.getItems(
+            sortBy = sortBy,
+            parentId = id.toUUID()
+        ).content.items
+    }
+
+    private suspend fun fetchArtistAlbums(id: String): List<BaseItemDto> {
+        return api.itemsApi.getItems(
             sortBy = listOf(
                 ItemSortBy.PARENT_INDEX_NUMBER,
                 ItemSortBy.INDEX_NUMBER,
@@ -153,17 +293,11 @@ class JellyfinMediaTree(
             recursive = true,
             includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
             albumArtistIds = listOf(id.toUUID()),
-        )
-
-        return response.content.items.map {
-            val item = itemFactory.create(it)
-            mediaItems.put(item.mediaId, item)
-            item
-        }
+        ).content.items
     }
 
-    private suspend fun getFavourite(): List<MediaItem> {
-        val response = api.itemsApi.getItems(
+    private suspend fun fetchFavourites(): List<BaseItemDto> {
+        return api.itemsApi.getItems(
             recursive = true,
             filters = listOf(ItemFilter.IS_FAVORITE),
             includeItemTypes = listOf(
@@ -171,17 +305,7 @@ class JellyfinMediaTree(
                 BaseItemKind.MUSIC_ALBUM,
                 BaseItemKind.MUSIC_ARTIST
             )
-        )
-
-        return response.content.items.map {
-            val item = itemFactory.create(
-                it,
-                groupForItem(it),
-                parent = FAVOURITES
-            )
-            mediaItems.put(item.mediaId, item)
-            item
-        }
+        ).content.items
     }
 
     private fun groupForItem(dto: BaseItemDto): String = (
@@ -252,7 +376,8 @@ class JellyfinMediaTree(
     }
 
     /**
-     * Clears the cached MediaItems.
+     * Clears the cached MediaItems. Disk DTOs are kept on purpose: preference changes only affect
+     * MediaItem construction, so rebuilt items pick up new prefs without a network round-trip.
      */
     fun evictCache() {
         mediaItems.invalidateAll()

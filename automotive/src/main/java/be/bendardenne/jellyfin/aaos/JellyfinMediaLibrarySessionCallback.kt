@@ -4,6 +4,8 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.concurrent.futures.SuspendToFutureAdapter
@@ -61,6 +63,8 @@ class JellyfinMediaLibrarySessionCallback(
     }
 
     private lateinit var tree: JellyfinMediaTree;
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val subscriptions:
             MutableMap<MediaLibraryService.MediaLibrarySession, MutableSet<String>> = mutableMapOf()
@@ -146,6 +150,16 @@ class JellyfinMediaLibrarySessionCallback(
 
             val itemFactory = MediaItemFactory(service, jellyfinApi, artSize)
             tree = JellyfinMediaTree(service, jellyfinApi, itemFactory)
+            tree.onChildrenUpdated = { parentId, itemCount ->
+                // Fires from Dispatchers.IO; subscriptions is main-thread-confined.
+                mainHandler.post {
+                    subscriptions.forEach { (session, parentIds) ->
+                        if (parentIds.contains(parentId)) {
+                            session.notifyChildrenChanged(parentId, itemCount, null)
+                        }
+                    }
+                }
+            }
         }
 
         return SuspendToFutureAdapter.launchFuture {

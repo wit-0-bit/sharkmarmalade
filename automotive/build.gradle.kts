@@ -60,6 +60,8 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.9.2")
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation("org.jellyfin.sdk:jellyfin-core:1.8.6")
+    // On the runtime classpath transitively via the Jellyfin SDK, but not visible at compile time.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("com.google.dagger:hilt-android:2.59.2")
     implementation("org.slf4j:slf4j-api:2.0.17")
     implementation("org.slf4j:slf4j-android:1.7.36")
