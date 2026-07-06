@@ -3,6 +3,8 @@ package be.bendardenne.jellyfin.aaos
 import android.accounts.Account
 import android.accounts.AccountManager
 import android.os.Bundle
+import android.util.Log
+import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import be.bendardenne.jellyfin.aaos.auth.Authenticator
 
 class JellyfinAccountManager(private val accountManager: AccountManager) {
@@ -26,21 +28,29 @@ class JellyfinAccountManager(private val accountManager: AccountManager) {
         get() = token != null
 
     fun storeAccount(server: String, username: String, token: String): Account {
-        // Find existing account, if any
-        var account = accountManager.getAccountsByType(ACCOUNT_TYPE).firstOrNull {
-            accountManager.getUserData(it, USERDATA_SERVER_KEY).equals(server) &&
-                    it.name.equals(username)
-        }
+        // Android keys accounts by (name, type), so there is at most one account per username —
+        // match on the name alone. Matching on server too used to miss the existing account when
+        // the same user re-signed in against a moved server, then addAccountExplicitly returned
+        // false (name+type already exists) without applying the new server, leaving a stale URL
+        // paired with a fresh token that 401s forever.
+        var account = accountManager.getAccountsByType(ACCOUNT_TYPE)
+            .firstOrNull { it.name == username }
 
         if (account == null) {
             account = Account(username, ACCOUNT_TYPE)
-            accountManager.addAccountExplicitly(
+            val added = accountManager.addAccountExplicitly(
                 account,
                 "",     // We don't keep the password, just the auth token.
                 Bundle().also { it.putString(USERDATA_SERVER_KEY, server) }
             )
+            if (!added) {
+                Log.w(LOG_MARKER, "addAccountExplicitly returned false for $username")
+            }
         }
 
+        // Always (re)assert the server URL and token so a re-login to a moved server updates the
+        // stored URL instead of keeping the stale one.
+        accountManager.setUserData(account, USERDATA_SERVER_KEY, server)
         accountManager.setAuthToken(account, TOKEN_TYPE, token)
 
         return account
