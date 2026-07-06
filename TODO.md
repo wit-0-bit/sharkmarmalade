@@ -104,9 +104,10 @@ Lower priority: real but low-impact, speculative, or purely maintainability.
       redundant with tapping track 1 (PARENT_KEY expansion already queues the full album). Low-severity residuals worth a later pass:
       shuffle-mode side effect on the add-to-queue path, sequential album gathering on first
       shuffle-all tap, notify itemCount off-by-one for synthetic-row parents.
-- [ ] Add Google Assistant **App Actions** (`actions.intent.PLAY_MEDIA` via `shortcuts.xml`) so
-      voice search works as "Hey Google, play X on Shark Marmalade" without any in-app navigation —
-      confirmed absent today (no `shortcuts.xml`/`actions.xml` anywhere in the project).
+- [x] Voice search — **done** (`voice-search` branch), but NOT via App Actions/`shortcuts.xml` as
+      originally guessed: on AAOS Assistant uses the media session's play-from-search, which media3
+      delivers as a blank-mediaId item in `onSetMediaItems` (previously crashed in `"".toUUID()`).
+      See `CLAUDE.md` for the full mechanism and residuals. Needs a real-Assistant test in the car.
 - [x] Better caching — **done** (audio `SimpleCache` 1 GiB LRU + stale-while-revalidate disk cache
       for the media tree; built, adversarially verified, uncommitted — see `CLAUDE.md` "Caching"
       for design, invariants, and accepted residuals). Remaining from that theme: the album-art

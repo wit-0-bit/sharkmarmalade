@@ -347,13 +347,26 @@ branch), `SharkMarmaladeConstants.kt` (remove `PREF_ALBUM_BEHAVIOUR`/`EXPAND`/`P
 `preferences.xml`/`arrays.xml`/`strings.xml` (delete the `Library` preference category and its
 array/string), plus new drawables for the Artists and Browse tabs and Browse's category nodes.
 
-**Voice search shortcut (new, addresses a separate friction point).** Confirmed via grep: this app
-has zero Google Assistant **App Actions** integration today — no `shortcuts.xml`, no `actions.xml`,
-nothing in the manifest. That means the only way to search by voice today is host-UI-mediated (tap
-search, tap the mic/speech-to-text icon, then speak). Declaring an `actions.intent.PLAY_MEDIA`
-capability (via `shortcuts.xml`, tied to the existing `onSearch`/`onGetSearchResult` callback) would
-let a user say *"Hey Google, play [artist] on Shark Marmalade"* directly, with no in-app navigation
-at all — this is a real, addable feature, not a design change to the browse tree.
+**Voice search (IMPLEMENTED 2026-07-05, `voice-search` branch).** The original plan here suggested
+App Actions/`shortcuts.xml` — investigation against the actual media3-session 1.9.2 bytecode proved
+that wrong for AAOS: those are phone-form-factor deep-link mechanisms. In the car, Assistant reaches
+media apps through the session's legacy `onPlayFromSearch`, which media3's `MediaSessionLegacyStub`
+bridges into `onSetMediaItems` as a single MediaItem with a **blank mediaId** and the query in
+`requestMetadata.searchQuery` (Assistant extras like `android.intent.extra.focus` preserved in
+`requestMetadata.extras`); `ACTION_PLAY_FROM_SEARCH` is advertised automatically via
+`COMMAND_SET_MEDIA_ITEM`, so no manifest change is needed or was made. Before this change, that
+blank-id item crashed in `"".toUUID()` — voice play was actively broken, not just missing. Now:
+`searchQueryOrNull()` detects it in both `onSetMediaItems`/`onAddMediaItems`, resolves via
+`tree.search()` with ranked matching (artist > album > playlist > track, exact-then-contains,
+focus-extra-biased; winners resolving to zero tracks fall through to the next candidate), artist
+winners reuse the shuffle-all plumbing (`resolveParentTracks`, shared with the pinned row), blank
+queries play one random album, and a no-match query throws instead of returning an empty list —
+media3's stub ignores a failed future, so a misheard query can no longer wipe the live queue or the
+saved resumption playlist. `ensureTree()` guards voice/resumption arriving on a cold process before
+any browse. Residual lows: a URI-only blank-id request (playFromUri — no known host uses it) is
+treated as an empty query; shuffle mode is flipped before the fetch, so a failed artist fetch can
+leave shuffle on. End-to-end voice needs a real Assistant (car or signed-in emulator) — verified at
+the source level, not yet by voice.
 
 **Explicit tradeoffs, not hidden:**
 - Root grows from today's 4 tabs to 4 different tabs (Random/Artists/Favourites/Browse, replacing

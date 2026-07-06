@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.concurrent.futures.SuspendToFutureAdapter
@@ -31,6 +32,7 @@ import androidx.media3.session.SessionResult
 import androidx.preference.PreferenceManager
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PARENT_KEY
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAY_ALL_PREFIX
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.RANDOM_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_BITRATE
@@ -138,6 +140,30 @@ class JellyfinMediaLibrarySessionCallback(
         return super.onUnsubscribe(session, browser, parentId)
     }
 
+    /**
+     * The tree is normally built on the first onGetLibraryRoot (which carries the art-size hint),
+     * but voice search and playback resumption can arrive first on a cold process — e.g.
+     * "Hey Google, play X" or resuming from the head unit without ever opening the app.
+     */
+    private fun ensureTree(artSize: Int = 512) {
+        if (::tree.isInitialized) {
+            return
+        }
+
+        val itemFactory = MediaItemFactory(service, jellyfinApi, artSize)
+        tree = JellyfinMediaTree(service, jellyfinApi, itemFactory)
+        tree.onChildrenUpdated = { parentId, itemCount ->
+            // Fires from Dispatchers.IO; subscriptions is main-thread-confined.
+            mainHandler.post {
+                subscriptions.forEach { (session, parentIds) ->
+                    if (parentIds.contains(parentId)) {
+                        session.notifyChildrenChanged(parentId, itemCount, null)
+                    }
+                }
+            }
+        }
+    }
+
     override fun onGetLibraryRoot(
         session: MediaLibraryService.MediaLibrarySession,
         browser: MediaSession.ControllerInfo,
@@ -145,23 +171,9 @@ class JellyfinMediaLibrarySessionCallback(
     ): ListenableFuture<LibraryResult<MediaItem>> {
         Log.i(LOG_MARKER, "onGetRoot")
 
-        if (!::tree.isInitialized) {
-            val artSize = params?.extras?.getInt(EXTRAS_KEY_MEDIA_ART_SIZE_PIXELS) ?: 512
-            Log.d(LOG_MARKER, "Art size hint from system: $artSize")
-
-            val itemFactory = MediaItemFactory(service, jellyfinApi, artSize)
-            tree = JellyfinMediaTree(service, jellyfinApi, itemFactory)
-            tree.onChildrenUpdated = { parentId, itemCount ->
-                // Fires from Dispatchers.IO; subscriptions is main-thread-confined.
-                mainHandler.post {
-                    subscriptions.forEach { (session, parentIds) ->
-                        if (parentIds.contains(parentId)) {
-                            session.notifyChildrenChanged(parentId, itemCount, null)
-                        }
-                    }
-                }
-            }
-        }
+        val artSize = params?.extras?.getInt(EXTRAS_KEY_MEDIA_ART_SIZE_PIXELS) ?: 512
+        Log.d(LOG_MARKER, "Art size hint from system: $artSize")
+        ensureTree(artSize)
 
         return SuspendToFutureAdapter.launchFuture {
             LibraryResult.ofItem(
@@ -240,8 +252,16 @@ class JellyfinMediaLibrarySessionCallback(
         mediaItems: List<MediaItem>,
     ): ListenableFuture<List<MediaItem>> {
         Log.i(LOG_MARKER, "onAddMediaItems $mediaItems")
+        ensureTree()
         return SuspendToFutureAdapter.launchFuture {
-            if (isPlayAll(mediaItems)) {
+            val searchQuery = searchQueryOrNull(mediaItems)
+            if (searchQuery != null) {
+                resolveSearch(
+                    mediaSession,
+                    searchQuery,
+                    mediaItems[0].requestMetadata.extras
+                ).mediaItems
+            } else if (isPlayAll(mediaItems)) {
                 resolvePlayAll(mediaSession, mediaItems[0].mediaId)
             } else {
                 resolveMediaItems(mediaItems)
@@ -257,7 +277,24 @@ class JellyfinMediaLibrarySessionCallback(
         startPositionMs: Long,
     ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
         Log.i(LOG_MARKER, "onSetMediaItems $mediaItems")
+        ensureTree()
         return SuspendToFutureAdapter.launchFuture {
+            // Assistant's playFromSearch arrives as a single item with a blank mediaId and the
+            // query in requestMetadata. Handle it before anything can pass "" to tree.getItem().
+            val searchQuery = searchQueryOrNull(mediaItems)
+            if (searchQuery != null) {
+                val result =
+                    resolveSearch(mediaSession, searchQuery, mediaItems[0].requestMetadata.extras)
+                if (result.mediaItems.isEmpty()) {
+                    // Returning an empty result would be applied as setMediaItems(emptyList),
+                    // wiping the live queue, and saving it would destroy resumption state. A
+                    // failed future is ignored by media3's legacy stub, keeping both intact.
+                    throw UnsupportedOperationException("Voice search matched nothing")
+                }
+                savePlaylist(result.mediaItems)
+                return@launchFuture result
+            }
+
             if (isPlayAll(mediaItems)) {
                 val resolvedItems = resolvePlayAll(mediaSession, mediaItems[0].mediaId)
                 savePlaylist(resolvedItems)
@@ -324,21 +361,193 @@ class JellyfinMediaLibrarySessionCallback(
      * artist (shuffled), or an album in track order.
      */
     private suspend fun resolvePlayAll(session: MediaSession, mediaId: String): List<MediaItem> {
-        val parentId = mediaId.removePrefix(PLAY_ALL_PREFIX)
+        return resolveParentTracks(session, mediaId.removePrefix(PLAY_ALL_PREFIX))
+    }
+
+    /**
+     * Resolves a container (artist/album/playlist) to its real playable tracks: everything by an
+     * artist (shuffled), or an album/playlist in track order.
+     */
+    private suspend fun resolveParentTracks(
+        session: MediaSession,
+        parentId: String
+    ): List<MediaItem> {
         val isArtist =
             tree.getItem(parentId).mediaMetadata.mediaType == MediaMetadata.MEDIA_TYPE_ARTIST
 
-        session.player.shuffleModeEnabled = isArtist
-        session.setMediaButtonPreferences(CommandButtons.createButtons(session.player))
-
         val children = realChildren(parentId)
-        return if (isArtist) {
+        val tracks = if (isArtist) {
             children.flatMap { album ->
                 realChildren(album.mediaId).filter { it.mediaMetadata.isPlayable == true }
             }
         } else {
             children.filter { it.mediaMetadata.isPlayable == true }
         }
+
+        if (tracks.isNotEmpty()) {
+            session.player.shuffleModeEnabled = isArtist
+            session.setMediaButtonPreferences(CommandButtons.createButtons(session.player))
+        }
+
+        return tracks
+    }
+
+    /**
+     * Detects a (legacy) play/prepare-from-search request. Assistant's onPlayFromSearch is
+     * bridged by media3's MediaSessionLegacyStub into onSetMediaItems with a single MediaItem
+     * whose mediaId is blank and whose requestMetadata carries the search query and the
+     * Assistant extras. Returns the query ("" for "play some music"-style empty queries, which
+     * also covers blank-id items with no query at all), or null if this is not a search request.
+     */
+    private fun searchQueryOrNull(mediaItems: List<MediaItem>): String? {
+        if (mediaItems.size != 1 || mediaItems[0].mediaId.isNotBlank()) {
+            return null
+        }
+
+        return mediaItems[0].requestMetadata.searchQuery ?: ""
+    }
+
+    /**
+     * Resolves a voice search query to a playable queue. An empty query plays a random album; a
+     * matching artist plays their whole discography shuffled; a matching album/playlist plays in
+     * order; a matching track plays in its parent context. No match resolves to an empty queue.
+     */
+    private suspend fun resolveSearch(
+        session: MediaSession,
+        query: String,
+        extras: Bundle?
+    ): MediaSession.MediaItemsWithStartPosition {
+        val trimmed = query.trim()
+
+        if (trimmed.isEmpty()) {
+            // "Play some music": play the first random album in order, not the whole random tab.
+            val album = realChildren(RANDOM_ALBUMS).firstOrNull()
+                ?: return emptySearchResult("blank query, no albums available")
+            Log.i(
+                LOG_MARKER,
+                "Voice search: blank query -> random album \"${album.mediaMetadata.title}\""
+            )
+            return searchResultOf(session, resolveParentTracks(session, album.mediaId))
+        }
+
+        val focus = extras?.getString(MediaStore.EXTRA_MEDIA_FOCUS)
+        val candidates = rankSearchResults(trimmed, tree.search(trimmed), focus)
+        if (candidates.isEmpty()) {
+            return emptySearchResult("no results for \"$trimmed\" (focus=$focus)")
+        }
+
+        // A winner can resolve to zero tracks (e.g. an empty playlist whose title matches the
+        // query exactly); fall back to the next-best result instead of queueing nothing.
+        for (winner in candidates) {
+            val result = resolveSearchWinner(session, winner)
+            if (result.mediaItems.isNotEmpty()) {
+                Log.i(
+                    LOG_MARKER,
+                    "Voice search: \"$trimmed\" (focus=$focus) -> " +
+                            "\"${winner.mediaMetadata.title}\" " +
+                            "(mediaType=${winner.mediaMetadata.mediaType})"
+                )
+                return result
+            }
+            Log.i(
+                LOG_MARKER,
+                "Voice search: \"${winner.mediaMetadata.title}\" has no playable tracks, " +
+                        "trying next result"
+            )
+        }
+
+        return emptySearchResult(
+            "all results for \"$trimmed\" resolved to zero tracks (focus=$focus)"
+        )
+    }
+
+    /**
+     * Resolves a single search result to a playable queue: a container (artist/album/playlist)
+     * plays its tracks, a track plays in its parent context when one is known.
+     */
+    private suspend fun resolveSearchWinner(
+        session: MediaSession,
+        winner: MediaItem
+    ): MediaSession.MediaItemsWithStartPosition {
+        return when (winner.mediaMetadata.mediaType) {
+            MediaMetadata.MEDIA_TYPE_ARTIST,
+            MediaMetadata.MEDIA_TYPE_ALBUM,
+            MediaMetadata.MEDIA_TYPE_PLAYLIST ->
+                searchResultOf(session, resolveParentTracks(session, winner.mediaId))
+
+            else -> {
+                // A track: play it in its parent context when one is known, like a browse tap.
+                if (isSingleItemWithParent(listOf(winner))) {
+                    val items = expandSingleItem(winner)
+                    MediaSession.MediaItemsWithStartPosition(
+                        items,
+                        items.indexOfFirst { it.mediaId == winner.mediaId }.coerceAtLeast(0),
+                        C.TIME_UNSET
+                    )
+                } else {
+                    searchResultOf(session, resolveMediaItems(listOf(winner)))
+                }
+            }
+        }
+    }
+
+    private fun emptySearchResult(reason: String): MediaSession.MediaItemsWithStartPosition {
+        Log.i(LOG_MARKER, "Voice search: $reason")
+        return MediaSession.MediaItemsWithStartPosition(listOf(), C.INDEX_UNSET, C.TIME_UNSET)
+    }
+
+    private fun searchResultOf(
+        session: MediaSession,
+        items: List<MediaItem>
+    ): MediaSession.MediaItemsWithStartPosition {
+        // With shuffle on, an explicit start index would override shuffle order (see
+        // onSetMediaItems' PLAY_ALL branch). An empty list must not get an explicit index either.
+        val startIndex =
+            if (items.isEmpty() || session.player.shuffleModeEnabled) C.INDEX_UNSET else 0
+        return MediaSession.MediaItemsWithStartPosition(items, startIndex, C.TIME_UNSET)
+    }
+
+    /**
+     * Ranks the search results by play-worthiness: title matches in category order (artist >
+     * album > playlist > track, with Assistant's media-focus category boosted to the front when
+     * present, and exact title matches beating contains-matches within a category), then any
+     * artist, then anything playable, then anything at all.
+     */
+    private fun rankSearchResults(
+        query: String,
+        results: List<MediaItem>,
+        focus: String?
+    ): List<MediaItem> {
+        val focusType = when (focus) {
+            MediaStore.Audio.Artists.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_ARTIST
+            MediaStore.Audio.Albums.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_ALBUM
+            "vnd.android.cursor.item/playlist" -> MediaMetadata.MEDIA_TYPE_PLAYLIST
+            MediaStore.Audio.Media.ENTRY_CONTENT_TYPE -> MediaMetadata.MEDIA_TYPE_MUSIC
+            else -> null
+        }
+
+        val categories = listOf(
+            MediaMetadata.MEDIA_TYPE_ARTIST,
+            MediaMetadata.MEDIA_TYPE_ALBUM,
+            MediaMetadata.MEDIA_TYPE_PLAYLIST,
+            MediaMetadata.MEDIA_TYPE_MUSIC
+        ).sortedByDescending { it == focusType } // Stable sort: keeps the default order otherwise.
+
+        val title = { item: MediaItem -> item.mediaMetadata.title?.toString().orEmpty() }
+        val ranked = mutableListOf<MediaItem>()
+        for (type in categories) {
+            val ofType = results.filter { it.mediaMetadata.mediaType == type }
+            val (exact, rest) = ofType.partition { title(it).equals(query, ignoreCase = true) }
+            ranked += exact
+            ranked += rest.filter { title(it).contains(query, ignoreCase = true) }
+        }
+
+        ranked += results.filter { it.mediaMetadata.mediaType == MediaMetadata.MEDIA_TYPE_ARTIST }
+        ranked += results.filter { it.mediaMetadata.isPlayable == true }
+        ranked += results
+
+        // Keeps the first (highest-ranked) occurrence of each item.
+        return ranked.distinctBy { it.mediaId }
     }
 
     private suspend fun realChildren(parentId: String): List<MediaItem> {
@@ -365,7 +574,8 @@ class JellyfinMediaLibrarySessionCallback(
 
         mediaItems.forEach {
             // Pinned "Play All" rows are intercepted upstream; never queue one as a track.
-            if (it.mediaId.startsWith(PLAY_ALL_PREFIX)) {
+            // Blank ids (search requests are intercepted upstream too) would crash toUUID().
+            if (it.mediaId.isBlank() || it.mediaId.startsWith(PLAY_ALL_PREFIX)) {
                 return@forEach
             }
             // We need to call getItem to resolve the full item: the provided MediaItem only has an ID.
@@ -419,6 +629,7 @@ class JellyfinMediaLibrarySessionCallback(
         controller: MediaSession.ControllerInfo,
         isForPlayback: Boolean
     ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+        ensureTree()
         return SuspendToFutureAdapter.launchFuture {
             val prefs = PreferenceManager.getDefaultSharedPreferences(service)
 
