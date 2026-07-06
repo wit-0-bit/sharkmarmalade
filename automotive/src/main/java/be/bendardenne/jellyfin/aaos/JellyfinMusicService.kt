@@ -149,25 +149,35 @@ class JellyfinMusicService : MediaLibraryService() {
         val exoPlayer = player as ExoPlayer
         // MediaItem has changed; if there was a previous item playing, mark it stopped.
         if (currentTrack != null) {
-            Log.i(LOG_MARKER, "Reporting playback stopped: ${currentPlaybackTime}")
-            jellyfinApi.playStateApi.onPlaybackStopped(
-                currentTrack!!.mediaId.toUUID(),
-                positionTicks = 10000 * currentPlaybackTime
-            )
+            try {
+                Log.i(LOG_MARKER, "Reporting playback stopped: ${currentPlaybackTime}")
+                jellyfinApi.playStateApi.onPlaybackStopped(
+                    currentTrack!!.mediaId.toUUID(),
+                    positionTicks = 10000 * currentPlaybackTime
+                )
+            } catch (e: Exception) {
+                // The playstate report is launched into a discarded future, so a failure here is
+                // otherwise completely silent (lost scrobble). At least log it.
+                Log.w(LOG_MARKER, "Failed to report playback stopped", e)
+            }
         }
 
         if (player.currentMediaItem != null) {
-            val format = exoPlayer.audioFormat
-            val formatString = "${format?.containerMimeType} at ${format?.averageBitrate} bps"
+            try {
+                val format = exoPlayer.audioFormat
+                val formatString = "${format?.containerMimeType} at ${format?.averageBitrate} bps"
 
-            Log.i(
-                LOG_MARKER,
-                "Playing $formatString: ${exoPlayer.currentMediaItem?.localConfiguration?.uri}"
-            )
-            jellyfinApi.playStateApi.onPlaybackStart(
-                player.currentMediaItem!!.mediaId.toUUID(),
-                canSeek = true
-            )
+                Log.i(
+                    LOG_MARKER,
+                    "Playing $formatString: ${exoPlayer.currentMediaItem?.localConfiguration?.uri}"
+                )
+                jellyfinApi.playStateApi.onPlaybackStart(
+                    player.currentMediaItem!!.mediaId.toUUID(),
+                    canSeek = true
+                )
+            } catch (e: Exception) {
+                Log.w(LOG_MARKER, "Failed to report playback start", e)
+            }
         }
     }
 }

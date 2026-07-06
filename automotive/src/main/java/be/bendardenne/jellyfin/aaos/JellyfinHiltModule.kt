@@ -11,12 +11,14 @@ import org.jellyfin.sdk.Jellyfin
 import org.jellyfin.sdk.android.androidDevice
 import org.jellyfin.sdk.createJellyfin
 import org.jellyfin.sdk.model.ClientInfo
+import javax.inject.Singleton
 
 @Module
 @InstallIn(SingletonComponent::class)
 class JellyfinHiltModule {
 
     @Provides
+    @Singleton
     fun provideJellyfin(@ApplicationContext appContext: Context): Jellyfin {
         val version =
             appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
@@ -29,6 +31,7 @@ class JellyfinHiltModule {
     }
 
     @Provides
+    @Singleton
     fun provideAccountManager(@ApplicationContext appContext: Context): JellyfinAccountManager {
         return JellyfinAccountManager(AccountManager.get(appContext))
     }
