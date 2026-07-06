@@ -29,6 +29,14 @@ once per machine, not per checkout:
   create an AVD with device profile `automotive_1024p_landscape`.
 - Verified end-to-end this session: `./gradlew :automotive:assembleDebug` builds, the AAOS emulator
   boots and reports `android.hardware.type.automotive`, and the debug APK installs via `adb install`.
+- **Sideload gotcha**: `adb install -r` (or `am force-stop`) kills the app out from under the
+  emulator's Media Center, which then holds a dead session token — task-switching back to it shows
+  "Loading content…" forever (it never rebinds; confirmed via logcat: zero app activity during the
+  hang). Only a fresh drawer launch re-dispatches. Not an app bug and can't happen from normal
+  in-car use. Dev workaround: after every `adb install -r`, also run
+  `adb shell am force-stop com.android.car.media` so the host rebuilds its state cleanly.
+- The emulator's foreground user is a **secondary user (10)** — `adb shell run-as <pkg>` inspects
+  user 0's empty data dir unless you pass `--user $(adb shell am get-current-user)`.
 
 ## Module layout
 
