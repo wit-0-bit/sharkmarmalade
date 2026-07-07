@@ -159,6 +159,7 @@ class JellyfinMediaLibrarySessionCallback(
             mainHandler.post {
                 subscriptions.forEach { (session, parentIds) ->
                     if (parentIds.contains(parentId)) {
+                        Log.i(LOG_MARKER, "notifyChildrenChanged($parentId, count=$itemCount)")
                         session.notifyChildrenChanged(parentId, itemCount, null)
                     }
                 }

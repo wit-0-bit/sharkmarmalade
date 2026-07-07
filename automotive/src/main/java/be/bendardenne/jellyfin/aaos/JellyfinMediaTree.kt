@@ -221,7 +221,12 @@ class JellyfinMediaTree(
                 // top — so a server that returns the same items in a different order must NOT
                 // trigger it. Only a real change (item added/removed/renamed/favourited) should.
                 // Ids are unique, so sorting the fingerprints gives a stable canonical compare.
-                if (cached.map(::fingerprint).sorted() != fresh.map(::fingerprint).sorted()) {
+                val changed = cached.map(::fingerprint).sorted() != fresh.map(::fingerprint).sorted()
+                Log.d(
+                    LOG_MARKER,
+                    "Revalidated $key: changed=$changed (cached=${cached.size}, fresh=${fresh.size})"
+                )
+                if (changed) {
                     onChildrenUpdated?.invoke(key, fresh.size)
                 }
             } catch (e: Exception) {
