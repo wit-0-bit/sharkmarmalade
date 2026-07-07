@@ -216,7 +216,12 @@ class JellyfinMediaTree(
                 if (!persist(key, fresh)) {
                     return@launch
                 }
-                if (cached.map(::fingerprint) != fresh.map(::fingerprint)) {
+                // Compare order-INsensitively. The browse protocol only supports a full-list
+                // notify, which makes the car reload the list and reset the user's scroll to the
+                // top — so a server that returns the same items in a different order must NOT
+                // trigger it. Only a real change (item added/removed/renamed/favourited) should.
+                // Ids are unique, so sorting the fingerprints gives a stable canonical compare.
+                if (cached.map(::fingerprint).sorted() != fresh.map(::fingerprint).sorted()) {
                     onChildrenUpdated?.invoke(key, fresh.size)
                 }
             } catch (e: Exception) {
@@ -403,6 +408,11 @@ class JellyfinMediaTree(
 
     private suspend fun fetchArtists(): List<BaseItemDto> {
         return api.artistsApi.getAlbumArtists(
+            // Explicit stable order so a revalidation fetch returns the same sequence — keeps the
+            // disk cache and fingerprint deterministic (belt-and-suspenders with the
+            // order-insensitive revalidation compare above).
+            sortBy = listOf(ItemSortBy.SORT_NAME),
+            sortOrder = listOf(SortOrder.ASCENDING),
             limit = maxItemsPerPage
         ).content.items
     }
