@@ -1,9 +1,20 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("com.google.dagger.hilt.android")
     id("com.google.devtools.ksp")
+}
+
+// Upload-key credentials for the Play release build. keystore.properties and the .jks it points
+// at are gitignored and never committed; a checkout without them still builds debug (and an
+// unsigned release). See CLAUDE.md "Release signing".
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -16,9 +27,9 @@ android {
         // closed-testing track (and to coexist with the upstream app). The ContentProvider
         // authority and account type follow it via BuildConfig.APPLICATION_ID and the
         // account_type resValue below.
-        applicationId = "elizardbeth.dorsal"
+        applicationId = "elizardbeth.finale"
         minSdk = 29
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 38
         versionName = "1.4"
 
@@ -36,6 +47,17 @@ android {
         viewBinding = true
     }
 
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -43,6 +65,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Only attach the signing config when the credentials are present, so a checkout
+            // without keystore.properties still configures (producing an unsigned release).
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {

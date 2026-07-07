@@ -1,4 +1,4 @@
-# Dorsal (Shark Marmalade fork)
+# Finale (Shark Marmalade fork)
 
 Personal fork of [Shark Marmalade](https://github.com/bendardenne/sharkmarmalade), a third-party
 Jellyfin music client for Android Automotive OS (AAOS). GPL-2.0. **Not intended for upstreaming or
@@ -6,24 +6,42 @@ publishing** — the audience is the owner's own Polestar 3 and Jellyfin server 
 `libfdk_aac`, verified via ssh), so design decisions optimize for that setup, not a general user
 base. Remotes: `origin` = wit-0-bit/sharkmarmalade (the fork), `upstream` = bendardenne.
 
-**Identity (2026-07-05 rebrand):** `applicationId = elizardbeth.dorsal`, display name **Dorsal**.
-The `namespace` — and therefore all source packages, class names, the theme, and the `LOG_MARKER`
-logcat tag — deliberately stays `be.bendardenne.jellyfin.aaos` / `SharkMarmalade`. The distinct id
-exists because upstream owns the original id on Google Play and the only way onto a production
-Polestar is a Play **closed-testing** track (ADB/developer mode is disabled on production
-Polestars; the community-verified path is Play Console → Automotive release type under Advanced
-Settings → closed track → add the car's Google account as tester). Everything that rides on the
-app identity derives automatically: ContentProvider authority = `${applicationId}` in the manifest
-and `BuildConfig.APPLICATION_ID` in code, account type = `BuildConfig.APPLICATION_ID` +
-an `account_type` resValue for `authenticator.xml`, tab-icon artwork URIs =
+**Identity (2026-07-05 → renamed to Finale 2026-07-06):** `applicationId = elizardbeth.finale`,
+display name **Finale** (was Dorsal; the name is `@string/app_name`, which *also* becomes the
+Jellyfin client name via `ClientInfo(getString(R.string.app_name), …)` — so it's how the app
+shows up in the server's Devices list). The `namespace` — and therefore all source packages,
+class names, the theme, and the `LOG_MARKER` logcat tag — deliberately stays
+`be.bendardenne.jellyfin.aaos` / `SharkMarmalade`. The distinct id exists because upstream owns
+the original id on Google Play and the only way onto a production Polestar is a Play
+**closed-testing** track (ADB/developer mode is disabled on production Polestars; the
+community-verified path is Play Console → Automotive release type under Advanced Settings → closed
+track → add the car's Google account as tester). Everything that rides on the app identity derives
+automatically: ContentProvider authority = `${applicationId}` in the manifest and
+`BuildConfig.APPLICATION_ID` in code, account type = `BuildConfig.APPLICATION_ID` + an
+`account_type` resValue for `authenticator.xml`, tab-icon artwork URIs =
 `android.resource://${context.packageName}/...`. Don't reintroduce hardcoded identity strings.
+The applicationId is **frozen on the first Play upload** — it was changed dorsal→finale *before*
+any upload, which is the only free window; after publishing it can never change.
+
+**Release signing (set up 2026-07-06, pre-first-upload):** the release build is signed with an
+**upload key** at `~/.keystores/finale-upload.jks` (RSA 2048, alias `finale-upload`, valid to
+2053), whose credentials live in a gitignored `keystore.properties` at repo root (also stored in
+1Password). `build.gradle.kts` loads that file into a `signingConfigs.release` and only attaches
+it when the file exists (so a keyless checkout still builds an unsigned release / debug). Play App
+Signing is **Google-managed** for the actual app-signing key; our key is *only* the upload key
+(resettable via Play support if lost). Build the artifact with `./gradlew :automotive:bundleRelease`
+→ `automotive/build/outputs/bundle/release/automotive-release.aab`. Store assets (512² icon,
+feature graphic, screenshots) live in `assets/` but are still upstream Shark Marmalade's art —
+replace before a real listing.
 
 Single Gradle module (`automotive`), ~3000 lines of Kotlin, no tests (`testInstrumentationRunner`
 is configured but no `test/`/`androidTest/` source sets exist). Key versions (see
 `build.gradle.kts` files): AGP 9.1.0 (Gradle 9.5.1), Kotlin 2.3.4 (KSP, not kapt), Hilt 2.59.2,
 media3 1.9.2 (+ `media3-exoplayer-hls`), Jellyfin SDK 1.8.6, compileSdk 36, minSdk 29,
-targetSdk 34, JVM target 17. AGP 9 note: `buildConfig` and `resValues` build features must be
-(and are) explicitly enabled.
+targetSdk 35 (bumped from 34 on 2026-07-06 for Play's current-API upload floor; verified to
+install/run/browse on the API-34 emulator — API-35 edge-to-edge on the sign-in/settings screens is
+the one thing that couldn't be exercised there), JVM target 17. AGP 9 note: `buildConfig` and
+`resValues` build features must be (and are) explicitly enabled.
 
 ## Dev environment
 

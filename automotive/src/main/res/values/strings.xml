@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Dorsal</string>
+    <string name="app_name">Finale</string>
     <string name="sign_in_to_your_jellyfin_server">Sign in to your Jellyfin server</string>
     <string name="could_not_load">Could not load content</string>
     <string name="server_textfield_hint">https://myjellyfin.server.com:8096</string>
