@@ -30,7 +30,7 @@ android {
         applicationId = "elizardbeth.finale"
         minSdk = 29
         targetSdk = 35
-        versionCode = 39
+        versionCode = 40
         versionName = "1.4"
 
         // authenticator.xml can't use manifest placeholders, so the account type is injected
