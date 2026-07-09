@@ -12,7 +12,13 @@ import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ARTISTS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.BROWSE
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.BROWSE_ARTISTS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADED_ALBUMS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADED_ALBUM_PREFIX
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADED_ARTISTS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADED_ARTIST_PREFIX
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.FAVOURITES
+import be.bendardenne.jellyfin.aaos.downloads.DownloadStore
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.GENRES
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.LATEST_ALBUMS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.PLAYLISTS
@@ -48,6 +54,7 @@ class JellyfinMediaTree(
     private val context: Context,
     private val api: ApiClient,
     private val itemFactory: MediaItemFactory,
+    private val downloadStore: DownloadStore,
     private val maxItemsPerPage: Int = 120
 ) {
 
@@ -128,7 +135,17 @@ class JellyfinMediaTree(
             BROWSE_ARTISTS -> itemFactory.browseArtists()
             GENRES -> itemFactory.genres()
             ALBUMS -> itemFactory.albums()
+            DOWNLOADS -> itemFactory.downloads()
+            DOWNLOADED_ARTISTS -> itemFactory.downloadedArtists()
+            DOWNLOADED_ALBUMS -> itemFactory.downloadedAlbums()
             else -> when {
+                // Artist/album nodes inside the Downloaded tab: same item as the raw id, under
+                // a context-distinct mediaId (their children are restricted to downloads).
+                id.startsWith(DOWNLOADED_ARTIST_PREFIX) || id.startsWith(DOWNLOADED_ALBUM_PREFIX) ->
+                    getItem(id.substringAfter(':'))
+                        .buildUpon()
+                        .setMediaId(id)
+                        .build()
                 id.startsWith(PLAY_ALL_PREFIX) -> {
                     val parentId = id.removePrefix(PLAY_ALL_PREFIX)
                     val isArtist = getItem(parentId).mediaMetadata.mediaType == MEDIA_TYPE_ARTIST
@@ -143,18 +160,26 @@ class JellyfinMediaTree(
                     getItem(id.removePrefix(SINGLE_PREFIX)).buildUpon().setMediaId(id).build()
 
                 else -> {
-                    // Stream URLs / art URIs are rebuilt by the factory on every create().
-                    val cached = diskCache.readItem(id)
-                    val dto = cached
-                        ?: withRetry("item:$id") {
-                            api.userLibraryApi.getItem(id.toUUID()).content
-                        }.also {
-                            revalidationScope.launch { diskCache.writeItem(it) }
+                    // Downloaded tracks resolve from the download index first — voice search and
+                    // playback resumption then work on a cold process with zero network. The
+                    // syncer owns the index's freshness, so no revalidation is queued for these.
+                    val downloaded = downloadStore.track(id)
+                    if (downloaded != null) {
+                        itemFactory.create(downloaded)
+                    } else {
+                        // Stream URLs / art URIs are rebuilt by the factory on every create().
+                        val cached = diskCache.readItem(id)
+                        val dto = cached
+                            ?: withRetry("item:$id") {
+                                api.userLibraryApi.getItem(id.toUUID()).content
+                            }.also {
+                                revalidationScope.launch { diskCache.writeItem(it) }
+                            }
+                        if (cached != null) {
+                            revalidateItem(id)
                         }
-                    if (cached != null) {
-                        revalidateItem(id)
+                        itemFactory.create(dto)
                     }
-                    itemFactory.create(dto)
                 }
             }
         }
@@ -165,11 +190,9 @@ class JellyfinMediaTree(
             // Artists is deliberately the landing tab: it's disk-cached, so the app opens to
             // something usable even when the car has no connectivity. Random used to land here
             // and is deliberately uncached, which made a flaky cell radio look like a broken app.
-            // (Favourites would also cache fine but lands on an empty screen when nothing is
-            // favourited.)
             ROOT_ID -> listOf(
                 getItem(ARTISTS),
-                getItem(FAVOURITES),
+                getItem(DOWNLOADS),
                 getItem(BROWSE)
             )
 
@@ -177,10 +200,25 @@ class JellyfinMediaTree(
                 getItem(BROWSE_ARTISTS),
                 getItem(GENRES),
                 getItem(ALBUMS),
+                getItem(FAVOURITES),
                 getItem(LATEST_ALBUMS),
                 getItem(PLAYLISTS),
                 getItem(RANDOM_ALBUMS)
             )
+
+            // The Downloaded tab is built ENTIRELY from the local index — never the server's
+            // view. One downloaded album of a 35-album artist shows that artist with exactly
+            // that one album. Zero network anywhere below this node.
+            DOWNLOADS -> listOf(
+                getItem(DOWNLOADED_ARTISTS),
+                getItem(DOWNLOADED_ALBUMS)
+            )
+
+            DOWNLOADED_ARTISTS -> downloadStore.artists()
+                .mapNotNull { downloadedNode(it, DOWNLOADED_ARTIST_PREFIX) }
+
+            DOWNLOADED_ALBUMS -> downloadStore.albums()
+                .mapNotNull { downloadedNode(it, DOWNLOADED_ALBUM_PREFIX) }
 
             LATEST_ALBUMS -> childrenWithCache(id, ::fetchLatestAlbums, ::buildItems)
             RANDOM_ALBUMS -> getRandomAlbums()
@@ -201,8 +239,27 @@ class JellyfinMediaTree(
             BROWSE_ARTISTS -> childrenWithCache(id, ::fetchArtists, ::buildItems)
             GENRES -> childrenWithCache(id, ::fetchGenres, ::buildItems)
             ALBUMS -> childrenWithCache(id, ::fetchAlbums, ::buildItems)
-            else -> getItemChildren(id)
+            else -> when {
+                id.startsWith(DOWNLOADED_ARTIST_PREFIX) ->
+                    downloadStore.albumsFor(id.removePrefix(DOWNLOADED_ARTIST_PREFIX))
+                        .mapNotNull { downloadedNode(it, DOWNLOADED_ALBUM_PREFIX) }
+
+                id.startsWith(DOWNLOADED_ALBUM_PREFIX) ->
+                    downloadStore.tracksFor(id.removePrefix(DOWNLOADED_ALBUM_PREFIX))
+                        .mapNotNull { buildItem(it) }
+
+                else -> getItemChildren(id)
+            }
         }
+    }
+
+    // Builds the item under its Downloaded-tab mediaId and RAM-caches it under that id so
+    // getItem() on a host echo-back resolves without hitting loadItem's cold path.
+    private fun downloadedNode(dto: BaseItemDto, prefix: String): MediaItem? {
+        val base = buildItem(dto) ?: return null
+        val item = base.buildUpon().setMediaId(prefix + dto.id.toString()).build()
+        mediaItems.put(item.mediaId, item)
+        return item
     }
 
     /**
@@ -378,6 +435,13 @@ class JellyfinMediaTree(
     }
 
     private suspend fun getItemChildren(id: String): List<MediaItem> {
+        // A downloaded album's tracklist comes from the local index: the PARENT_KEY queue
+        // expansion (tap a track -> queue its album) then works with zero network, and the
+        // parent item itself needs no fetch either.
+        if (downloadStore.hasAlbum(id)) {
+            return downloadStore.tracksFor(id).mapNotNull { buildItem(it) }
+        }
+
         val mediaType = getItem(id).mediaMetadata.mediaType
 
         if (mediaType == MEDIA_TYPE_ARTIST) {

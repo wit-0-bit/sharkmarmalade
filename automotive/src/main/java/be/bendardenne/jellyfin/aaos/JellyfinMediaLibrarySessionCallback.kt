@@ -153,8 +153,9 @@ class JellyfinMediaLibrarySessionCallback(
             return
         }
 
-        val itemFactory = MediaItemFactory(service, jellyfinApi, artSize)
-        tree = JellyfinMediaTree(service, jellyfinApi, itemFactory)
+        val itemFactory =
+            MediaItemFactory(service, jellyfinApi, artSize, service.downloadStore::localTrack)
+        tree = JellyfinMediaTree(service, jellyfinApi, itemFactory, service.downloadStore)
         tree.onChildrenUpdated = { parentId, itemCount ->
             // Fires from Dispatchers.IO; subscriptions is main-thread-confined.
             mainHandler.post {

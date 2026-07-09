@@ -25,6 +25,8 @@
     <string name="albums">Albums</string>
     <string name="playlists">Playlists</string>
     <string name="browse">Browse</string>
+    <string name="downloaded">Downloaded</string>
+    <string name="favourites">Favourites</string>
     <string name="genres">Genres</string>
     <string name="recents">Recents</string>
     <string name="play_album">Play album</string>

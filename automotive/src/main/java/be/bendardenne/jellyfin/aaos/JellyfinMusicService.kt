@@ -10,6 +10,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -19,9 +20,19 @@ import androidx.media3.session.MediaSession
 import androidx.preference.PreferenceManager
 import be.bendardenne.jellyfin.aaos.JellyfinMediaLibrarySessionCallback.Companion.PLAYLIST_INDEX_PREF
 import be.bendardenne.jellyfin.aaos.JellyfinMediaLibrarySessionCallback.Companion.PLAYLIST_TRACK_POSITON_MS_PREF
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADED_ALBUMS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADED_ARTISTS
+import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.DOWNLOADS
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.ROOT_ID
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
+import be.bendardenne.jellyfin.aaos.downloads.DownloadStore
+import be.bendardenne.jellyfin.aaos.downloads.DownloadSyncer
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.jellyfin.sdk.Jellyfin
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.playStateApi
@@ -40,6 +51,12 @@ class JellyfinMusicService : MediaLibraryService() {
     private lateinit var mediaSourceFactory: DefaultMediaSourceFactory
     private lateinit var mediaLibrarySession: MediaLibrarySession
     private lateinit var callback: JellyfinMediaLibrarySessionCallback
+    lateinit var downloadStore: DownloadStore
+        private set
+    private lateinit var downloadSyncer: DownloadSyncer
+
+    // IO work owned by the service (download sync); cancelled with the service.
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val handler: Handler = Handler(Looper.getMainLooper())
     private var currentPlaybackTime: Long = 0;
@@ -71,6 +88,17 @@ class JellyfinMusicService : MediaLibraryService() {
         jellyfinApi = jellyfin.createApi()
         mediaSourceFactory = DefaultMediaSourceFactory(this)
 
+        downloadStore = DownloadStore(applicationContext, accountManager)
+        downloadSyncer = DownloadSyncer(jellyfinApi, accountManager, downloadStore)
+        downloadSyncer.onDownloadsChanged = {
+            handler.post {
+                // Only subscribed parents actually refresh; the rest are ignored by media3.
+                mediaLibrarySession.notifyChildrenChanged(DOWNLOADS, 2, null)
+                mediaLibrarySession.notifyChildrenChanged(DOWNLOADED_ARTISTS, Int.MAX_VALUE, null)
+                mediaLibrarySession.notifyChildrenChanged(DOWNLOADED_ALBUMS, Int.MAX_VALUE, null)
+            }
+        }
+
         val player = ExoPlayer.Builder(this)
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -94,6 +122,15 @@ class JellyfinMusicService : MediaLibraryService() {
         if (accountManager.isAuthenticated) {
             onLogin()
         }
+
+        // Periodic reconcile while the service lives, so collection edits made from the phone
+        // reach the car within a sync interval of driving. syncIfDue self-throttles.
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                serviceScope.launch { downloadSyncer.syncIfDue() }
+                handler.postDelayed(this, 5 * 60_000L)
+            }
+        }, 5 * 60_000L)
     }
 
     private fun pollForPlaybackStatus(player: ExoPlayer) {
@@ -125,6 +162,8 @@ class JellyfinMusicService : MediaLibraryService() {
         mediaLibrarySession.player.removeListener(playerListener)
         mediaLibrarySession.player.release()
         handler.removeCallbacks(playbackPoll)
+        handler.removeCallbacksAndMessages(null)
+        serviceScope.cancel()
         super.onDestroy()
     }
 
@@ -133,6 +172,9 @@ class JellyfinMusicService : MediaLibraryService() {
 
         // Trigger a refresh upon login.
         mediaLibrarySession.notifyChildrenChanged(ROOT_ID, 3, null)
+
+        // Reconcile downloads whenever credentials (re)land. Throttled internally.
+        serviceScope.launch { downloadSyncer.syncIfDue() }
     }
 
     /**
@@ -155,7 +197,11 @@ class JellyfinMusicService : MediaLibraryService() {
             .setUpstreamDataSourceFactory(authedFactory)
             // A cache I/O problem should degrade to plain network, not fail playback.
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-        mediaSourceFactory.setDataSourceFactory(cachedFactory)
+        // Route by scheme: downloaded tracks are file:// URIs and must go straight to disk
+        // (FileDataSource), NOT through the HTTP/cache chain — DefaultHttpDataSource throws on
+        // file URLs, and SimpleCache-ing a local file would just duplicate it.
+        val schemeRoutingFactory = DefaultDataSource.Factory(this, cachedFactory)
+        mediaSourceFactory.setDataSourceFactory(schemeRoutingFactory)
     }
 
     private suspend fun reportPlayback(player: Player) {

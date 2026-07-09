@@ -26,7 +26,10 @@ import org.jellyfin.sdk.model.api.MediaStreamProtocol
 class MediaItemFactory(
     private val context: Context,
     private val jellyfinApi: ApiClient,
-    private val artSize: Int
+    private val artSize: Int,
+    // Resolves a track id to its downloaded audio file (null = not downloaded). Downloaded
+    // tracks play from disk no matter where they were tapped; streaming is the fallback.
+    private val localTrack: (String) -> java.io.File? = { null }
 ) {
 
     companion object {
@@ -38,6 +41,13 @@ class MediaItemFactory(
         const val ARTISTS = "ARTISTS_ID"
         const val BROWSE = "BROWSE_ID"
         const val BROWSE_ARTISTS = "BROWSE_ARTISTS_ID"
+        const val DOWNLOADS = "DOWNLOADS_ID"
+        const val DOWNLOADED_ARTISTS = "DOWNLOADED_ARTISTS_ID"
+        const val DOWNLOADED_ALBUMS = "DOWNLOADED_ALBUMS_ID"
+        // Artist/album nodes *inside* the Downloaded tab. Distinct ids from the server-context
+        // nodes because their children differ: a downloaded artist lists only downloaded albums.
+        const val DOWNLOADED_ARTIST_PREFIX = "DOWNLOADED_ARTIST:"
+        const val DOWNLOADED_ALBUM_PREFIX = "DOWNLOADED_ALBUM:"
         const val GENRES = "GENRES_ID"
         const val ALBUMS = "ALBUMS_ID"
         const val PLAY_ALL_PREFIX = "PLAY_ALL:"
@@ -84,6 +94,36 @@ class MediaItemFactory(
 
     fun browseArtists(): MediaItem {
         return artistCategory(BROWSE_ARTISTS)
+    }
+
+    fun downloads(): MediaItem {
+        val extras = Bundle()
+        extras.putInt(
+            MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+            MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
+        )
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(context.getString(R.string.downloaded))
+            .setIsBrowsable(true)
+            .setIsPlayable(false)
+            .setArtworkUri(drawableUri("download"))
+            .setExtras(extras)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
+            .build()
+
+        return MediaItem.Builder()
+            .setMediaId(DOWNLOADS)
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    fun downloadedArtists(): MediaItem {
+        return artistCategory(DOWNLOADED_ARTISTS)
+    }
+
+    fun downloadedAlbums(): MediaItem {
+        return albumCategory(DOWNLOADED_ALBUMS, context.getString(R.string.albums), "album")
     }
 
     private fun artistCategory(id: String): MediaItem {
@@ -418,13 +458,18 @@ class MediaItemFactory(
             .setExtras(extras)
             .build()
 
+        // A downloaded track plays from disk regardless of how it was reached (Downloaded tab,
+        // Artists tab, search, voice) — streaming is the fallback, not the default. The local
+        // file is a discrete m4a, so it gets the progressive MIME type, not HLS.
+        val local = localTrack(item.id.toString())
+
         return MediaItem.Builder()
             .setMediaId(item.id.toString())
             .setMediaMetadata(metadata)
-            .setUri(audioStream)
+            .setUri(local?.let { Uri.fromFile(it) } ?: audioStream.toUri())
             // The universal URL gives no hint that the response is an HLS playlist; without an
             // explicit MIME type, ExoPlayer would try to parse it as progressive media.
-            .setMimeType(MimeTypes.APPLICATION_M3U8)
+            .setMimeType(if (local != null) MimeTypes.AUDIO_MP4 else MimeTypes.APPLICATION_M3U8)
             .build()
     }
 

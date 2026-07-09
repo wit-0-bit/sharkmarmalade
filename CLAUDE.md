@@ -93,6 +93,8 @@ automotive/src/main/java/be/bendardenne/jellyfin/aaos/
   JellyfinHiltModule.kt            Provides Jellyfin/JellyfinAccountManager singletons
   CommandButtons.kt                Repeat/shuffle custom session command buttons
   SharkMarmaladeConstants.kt       LOG_MARKER, bitrate pref keys
+  downloads/DownloadStore.kt       Downloaded music on disk: filesDir/downloads/<sha256(server)>/tracks/*.m4a + DTO index (artists/albums/tracks .json). Namespaced by server only (survives re-login). 10 GB cap const.
+  downloads/DownloadSyncer.kt      Reconciles the server-side "finale-downloads" collection (BoxSet) against the store: expands artists→albums→tracks, downloads AAC-256 m4a files via /Audio/{id}/stream.m4a, evicts removals, incremental index writes every 10 tracks
   signin/                          Sign-in Activity/Fragments/ViewModel (server URL, username/password, QuickConnect, SignedInFragment for already-authed launches)
   settings/                        Settings Activity/Fragment/ViewModel (bitrate, log upload)
 ```
@@ -107,15 +109,16 @@ automotive/src/main/java/be/bendardenne/jellyfin/aaos/
 callback delegates to `JellyfinMediaTree`, which serves nodes from a Guava RAM cache + the disk
 DTO cache and builds `MediaItem`s through `MediaItemFactory`.
 
-**Root = 3 tabs: Artists / Favourites / Browse** (since v43). Artists is deliberately the landing
+**Root = 3 tabs: Artists / Downloaded / Browse** (since v43). Artists is deliberately the landing
 tab: it's disk-cached, so the app opens to something usable with no connectivity (Random landed
-here before and is deliberately uncached — a flaky cell radio made the app look broken; it also
-would have been Favourites, but the owner's favourites list is empty, which lands on a blank
-screen). Browse is deliberately the overflow/catch-all for lower-priority categorizations:
-**Artist / Genre / Album / Recents / Playlists / Random** (Artist appears both as a root tab and
-a Browse category — same `fetchArtists()`, two tree node ids so revalidation notifies the right
-subscription). Old root tabs Latest Albums/Playlists moved into Browse as Recents/Playlists;
-Random demoted into Browse in v43.
+here before and is deliberately uncached — a flaky cell radio made the app look broken).
+Downloaded is the offline library (see Downloads section). Browse is deliberately the
+overflow/catch-all for lower-priority categorizations: **Artist / Genre / Album / Favourites /
+Recents / Playlists / Random** (Artist appears both as a root tab and a Browse category — same
+`fetchArtists()`, two tree node ids so revalidation notifies the right subscription). Old root
+tabs Latest Albums/Playlists moved into Browse as Recents/Playlists; Random and Favourites
+demoted into Browse in v43 (Favourites stays a favourites list — the owner favourites songs;
+downloads are a separate artist/album-level set).
 
 **Artists and albums are purely browsable** (`isBrowsable=true, isPlayable=false`). Playing:
 - **Track tap is context-sensitive, keyed off the row's `mediaId`** (the only thing the car host
@@ -153,6 +156,34 @@ carries duration and the server transcodes from any seek point on demand (~1 s s
 seek). Why AAC-256: the server's ffmpeg has `libfdk_aac`, which Jellyfin auto-prefers —
 transparent at 256 kbps. Known wart: the Settings "Max bitrate" pref still offers a default
 "Direct stream" entry that now silently produces the same 256k transcode (see TODO).
+
+### Downloads (built 2026-07-08, same session as v43 — design conversation with owner)
+
+**The download set is managed server-side via a Jellyfin collection named `finale-downloads`**
+("Add to collection" on any album or artist detail page, phone/web — the owner manages it from
+the couch; there is deliberately NO in-car download management). Favourites explicitly rejected
+as the marker (owner favourites *songs*, downloads *artists/albums* — different sets, different
+granularity). `DownloadSyncer` reconciles on service start/login + every 5 min (self-throttled
+to 15-min intervals): expands collection entities → tracks, downloads missing ones sequentially
+as **discrete AAC-256 .m4a files** via `/Audio/{id}/stream.m4a?audioCodec=aac&audioBitRate=256000`
+(verified against the live server: valid seekable files, ~2 MB/min; NOT the HLS path streaming
+uses), evicts unlisted tracks, caps at 10 GB (`DownloadStore.MAX_DOWNLOAD_BYTES`), and writes the
+DTO index incrementally so a radio drop mid-sync never hides finished downloads. Missing
+collection = no-op (never mass-evict on a rename); emptying the collection is the explicit purge.
+
+**Downloaded root tab** (replaced Favourites at root) is browse-shaped — Artists / Albums —
+and built ENTIRELY from the local index: one downloaded album of a 35-album artist shows that
+artist containing exactly that album (owner requirement). Node ids are context-prefixed
+(`DOWNLOADED_ARTIST:`/`DOWNLOADED_ALBUM:`) so RAM-cached server-context nodes don't collide.
+
+**Local-first playback**: `MediaItemFactory.forTrack` takes a `localTrack` resolver — a
+downloaded track plays from `file://` (MIME `audio/mp4`, not HLS) no matter where it was tapped
+(any tab, search, voice); streaming is the fallback. The service's data source chain is wrapped
+in `DefaultDataSource.Factory` to route `file://` to disk (DefaultHttpDataSource throws on file
+URLs — found the hard way). `JellyfinMediaTree` resolves downloaded albums' children and
+downloaded track DTOs from the index before disk-cache/network, so PARENT_KEY queue expansion,
+resumption, and voice all work with zero network. Verified end-to-end on the emulator with
+networking disabled: browse → tap → 12-track queue → playing from filesDir.
 
 ### Voice search
 
