@@ -15,11 +15,20 @@ class names, the theme, and the `LOG_MARKER` logcat tag — deliberately stays
 the original id on Google Play and the only way onto a production Polestar is a Play
 **closed-testing** track (ADB/developer mode is disabled on production Polestars; the
 community-verified path is Play Console → Automotive release type under Advanced Settings → closed
-track → add the car's Google account as tester). Everything that rides on the app identity derives
+track → add the car's Google account as tester). **Confirmed firsthand + externally (2026-07-07):**
+tapping the build number 7x *does* fire the standard AOSP "you are now a developer" toast, but the
+"Developer options" entry it unlocks is itself a dead end — it redirects to
+developer.volvocars.com, which is documentation/marketing for their **emulator**, not a real
+unlock. No ADB path exists on Polestar 2/3 (per Polestar/XDA forum threads); reportedly the
+Polestar 4 — a different platform generation — does allow real developer mode. Play closed
+testing is genuinely the only route for this car, not a workaround for something we missed.
+(Owner's assessment of whoever specifically designed the toast-then-wall UX: they deserve a
+miserable life.) Everything that rides on the app identity derives
 automatically: ContentProvider authority = `${applicationId}` in the manifest and
-`BuildConfig.APPLICATION_ID` in code, account type = `BuildConfig.APPLICATION_ID` + an
-`account_type` resValue for `authenticator.xml`, tab-icon artwork URIs =
+`BuildConfig.APPLICATION_ID` in code, tab-icon artwork URIs =
 `android.resource://${context.packageName}/...`. Don't reintroduce hardcoded identity strings.
+(The account type / `account_type` resValue / `authenticator.xml` are gone as of v43 — see the
+credentials note below.)
 The applicationId is **frozen on the first Play upload** — it was changed dorsal→finale *before*
 any upload, which is the only free window; after publishing it can never change.
 
@@ -79,13 +88,12 @@ automotive/src/main/java/be/bendardenne/jellyfin/aaos/
   MediaItemFactory.kt              Builds MediaItem/MediaMetadata per BaseItemKind + the synthetic root/Browse/Play-All nodes
   AlbumArtContentProvider.kt       ContentProvider proxying+caching album art behind content:// URIs
   AudioCache.kt                    Process-singleton media3 SimpleCache (LRU, quota-sized) around the streaming DataSource
-  JellyfinApi.kt                   Auth header construction for direct (non-SDK) HTTP requests
-  JellyfinAccountManager.kt        Wraps Android AccountManager for the stored Jellyfin account/token
+  JellyfinApi.kt                   Auth header construction for direct (non-SDK) HTTP requests + isNetworkFailure()
+  JellyfinAccountManager.kt        Jellyfin credentials (server/username/token) in app-private SharedPreferences ("credentials" file; NOT the default prefs — the pref-change listener must not fire on credential writes). One-time best-effort migration from the removed AccountManager account.
   JellyfinHiltModule.kt            Provides Jellyfin/JellyfinAccountManager singletons
   CommandButtons.kt                Repeat/shuffle custom session command buttons
   SharkMarmaladeConstants.kt       LOG_MARKER, bitrate pref keys
-  auth/                            AbstractAccountAuthenticator + bound Service (account type follows BuildConfig.APPLICATION_ID)
-  signin/                          Sign-in Activity/Fragments/ViewModel (server URL, username/password, QuickConnect)
+  signin/                          Sign-in Activity/Fragments/ViewModel (server URL, username/password, QuickConnect, SignedInFragment for already-authed launches)
   settings/                        Settings Activity/Fragment/ViewModel (bitrate, log upload)
 ```
 
@@ -99,11 +107,15 @@ automotive/src/main/java/be/bendardenne/jellyfin/aaos/
 callback delegates to `JellyfinMediaTree`, which serves nodes from a Guava RAM cache + the disk
 DTO cache and builds `MediaItem`s through `MediaItemFactory`.
 
-**Root = 4 tabs: Random / Artists / Favourites / Browse.** Browse is deliberately the
-overflow/catch-all for lower-priority categorizations: **Artist / Genre / Album / Recents /
-Playlists** (Artist appears both as a root tab and a Browse category — same `fetchArtists()`, two
-tree node ids so revalidation notifies the right subscription). Old root tabs Latest
-Albums/Playlists moved into Browse as Recents/Playlists.
+**Root = 3 tabs: Artists / Favourites / Browse** (since v43). Artists is deliberately the landing
+tab: it's disk-cached, so the app opens to something usable with no connectivity (Random landed
+here before and is deliberately uncached — a flaky cell radio made the app look broken; it also
+would have been Favourites, but the owner's favourites list is empty, which lands on a blank
+screen). Browse is deliberately the overflow/catch-all for lower-priority categorizations:
+**Artist / Genre / Album / Recents / Playlists / Random** (Artist appears both as a root tab and
+a Browse category — same `fetchArtists()`, two tree node ids so revalidation notifies the right
+subscription). Old root tabs Latest Albums/Playlists moved into Browse as Recents/Playlists;
+Random demoted into Browse in v43.
 
 **Artists and albums are purely browsable** (`isBrowsable=true, isPlayable=false`). Playing:
 - **Track tap is context-sensitive, keyed off the row's `mediaId`** (the only thing the car host
@@ -236,6 +248,38 @@ in `TODO.md` — this list is the reference state.
 > 120 fetch cap; per-art-size factory (deferred — negligible for one head unit); `ARTISTS`/
 > `BROWSE_ARTISTS` disk-key aliasing (deferred — negligible). Build green throughout; sign-in
 > verified end-to-end on the emulator. The detailed list below is the pre-fix reference.
+
+> **STATUS (2026-07-08, v43 "first real drive" batch):** the app reached the car (v42) and the
+> first drive shook out a connectivity story, all addressed in v43:
+> - **The car grants a 64 MB cache quota** (`getCacheQuotaBytes()`, measured via uploaded car
+>   log) — the "5 GiB" streaming cache is ~8 songs on real hardware. Album art therefore moved
+>   from `cacheDir` to **`filesDir/albumart`** (one-time rename migration in the provider's
+>   `onCreate`; own 256 MB LRU trim). Future Downloads must live in `filesDir` too.
+> - **Token drift fixed structurally**: the API client's token was process state set only at
+>   service start / LOGIN_COMMAND; when the car lost the handshake, browse presented a dead token
+>   (server logged "Invalid token") and the 401→sign-in mapping bounced the user to sign-in
+>   forever despite valid stored credentials. Now `syncAuth()` (callback, runs in `ensureTree()`
+>   on every entry point) re-applies stored credentials on drift and evicts the RAM item cache
+>   (items embed token-bearing URLs); `applyAuth()` split out of `onLogin()` in the service.
+>   LOGIN_COMMAND is a refresh hint, not a required link.
+> - **AccountManager removed entirely** (authenticator Service/XML/manifest/resValue deleted):
+>   credentials live in an app-private `credentials` SharedPreferences file; `clear()` = sign-out.
+>   Verified end-to-end on the emulator against the real server (QuickConnect approved by owner).
+> - **Host stale-error self-heal**: the car's media host caches an auth-error card and re-fires
+>   its resolution intent (SignInActivity) even after successful sign-in. SignInActivity now
+>   detects the already-authed launch, shows `SignedInFragment` ("Signed in to X as Y" +
+>   sign-out) instead of a blank server form, and pokes LOGIN_COMMAND so the host re-fetches.
+> - **Foreground fetch retry** (`withRetry` in the tree: 2 extra attempts, 500ms/1500ms backoff,
+>   only on transport failures via `isNetworkFailure()` cause-chain walk in `JellyfinApi.kt`);
+>   network failures get their own host error string ("Can't reach your Jellyfin server…")
+>   distinct from generic could-not-load. Background revalidation deliberately doesn't retry.
+> - **"Something went wrong / Check that Google Play is enabled"** at app launch on the car is
+>   Play's own entitlement check for closed-testing installs when the car is offline — NOT our
+>   code, cleared by connectivity. Open question whether Play re-checks every cold launch
+>   (matters for Downloads-offline); test airplane-mode launch once Downloads exist.
+> - The Polestar's cell radio sometimes fails to init until a head-unit restart (long-press the
+>   media/power button) — pure car flakiness, but it's why "handle bad connectivity way better"
+>   is the current theme. Next: Downloads (~10 GB in `filesDir`, AAC-256 ≈ 7–9 MB/track).
 
 **High**
 - `signin/SignInActivityViewModel.kt:61-113` — the QuickConnect polling coroutine has **zero

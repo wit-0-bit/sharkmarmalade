@@ -29,8 +29,10 @@ class AlbumArtContentProvider : ContentProvider() {
     companion object {
         private const val URI_MAP_MAX_ENTRIES = 2000
 
-        // Downloaded art lives in its own subdirectory so it can be size-capped independently of
-        // the other caches under cacheDir (audio/, tree/).
+        // Downloaded art lives under filesDir, NOT cacheDir: the car head unit grants a cache
+        // quota of all of 64 MB (measured on the Polestar 3), and cacheDir is the OS's to purge.
+        // Art is cheap, useful offline, and has its own LRU cap below — it belongs in app data,
+        // leaving cacheDir to the navigation/tree data and the streaming cache.
         private const val ART_DIR = "albumart"
 
         // Cap the on-disk art cache: trim down to the low-water mark once it exceeds the high one.
@@ -95,11 +97,22 @@ class AlbumArtContentProvider : ContentProvider() {
         private fun getMappedUri(uri: Uri): Uri? = synchronized(uriMap) { uriMap[uri] }
     }
 
-    override fun onCreate() = true
+    override fun onCreate(): Boolean {
+        // One-time move of the art cache out of cacheDir (same filesystem, so a cheap rename).
+        // Best-effort: on failure the old dir is just dead weight the OS may purge.
+        context?.let {
+            val legacyDir = File(it.cacheDir, ART_DIR)
+            val artDir = File(it.filesDir, ART_DIR)
+            if (legacyDir.isDirectory && !artDir.exists()) {
+                legacyDir.renameTo(artDir)
+            }
+        }
+        return true
+    }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val context = this.context ?: return null
-        val artDir = File(context.cacheDir, ART_DIR)
+        val artDir = File(context.filesDir, ART_DIR)
         val file = File(artDir, uri.path)
 
         // Serve a cached file without needing the in-memory uri mapping: the path derives purely
@@ -165,7 +178,8 @@ class AlbumArtContentProvider : ContentProvider() {
         var success = false
         try {
             artDir.mkdirs()
-            tmpFile = File.createTempFile("sharkmarmalade-albumart", ".png", context.cacheDir)
+            // Same directory tree as the final file so renameTo stays an atomic same-fs rename.
+            tmpFile = File.createTempFile("sharkmarmalade-albumart", ".png", context.filesDir)
 
             val request: Request = Request.Builder()
                 .url(remoteUri.toString())

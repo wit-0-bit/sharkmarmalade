@@ -34,6 +34,10 @@ class SignInActivityViewModel @Inject constructor() : ViewModel() {
     @Inject
     lateinit var accountManager: JellyfinAccountManager
 
+    fun signOut() {
+        accountManager.clear()
+    }
+
     private var quickConnectSecret: String = ""
 
     // Guards against a second polling loop being started (e.g. navigating back to the server

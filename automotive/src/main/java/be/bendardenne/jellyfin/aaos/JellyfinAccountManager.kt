@@ -1,58 +1,91 @@
 package be.bendardenne.jellyfin.aaos
 
-import android.accounts.Account
 import android.accounts.AccountManager
-import android.os.Bundle
+import android.content.Context
 import android.util.Log
+import androidx.core.content.edit
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
-import be.bendardenne.jellyfin.aaos.auth.Authenticator
 
-class JellyfinAccountManager(private val accountManager: AccountManager) {
+/**
+ * Stores the Jellyfin credentials (server URL, username, access token) in app-private
+ * SharedPreferences.
+ *
+ * This used to be backed by Android's AccountManager + an AbstractAccountAuthenticator, which
+ * bought nothing (no system "Add account" integration is wanted, no cross-app token sharing) and
+ * cost plenty: an authenticator Service + XML, a contract to honour, and a whole class of silent
+ * failure modes on production car head units where account mutation can be restricted by the OEM.
+ * A file in our own data dir cannot be refused by anyone.
+ */
+class JellyfinAccountManager(context: Context) {
 
     companion object {
-        const val ACCOUNT_TYPE = Authenticator.ACCOUNT_TYPE
-        const val TOKEN_TYPE = "$ACCOUNT_TYPE.access_token"
-        const val USERDATA_SERVER_KEY = "$ACCOUNT_TYPE.server"
+        // Kept for the one-time migration read; the authenticator itself is gone.
+        private const val LEGACY_ACCOUNT_TYPE = BuildConfig.APPLICATION_ID
+        private const val LEGACY_TOKEN_TYPE = "$LEGACY_ACCOUNT_TYPE.access_token"
+        private const val LEGACY_SERVER_KEY = "$LEGACY_ACCOUNT_TYPE.server"
+
+        // Deliberately NOT the default SharedPreferences: the session callback listens for
+        // changes on the default file (bitrate prefs), and credential writes must not fire it.
+        private const val PREFS_FILE = "credentials"
+        private const val KEY_SERVER = "server"
+        private const val KEY_USERNAME = "username"
+        private const val KEY_TOKEN = "token"
     }
 
-    private val account: Account?
-        get() = accountManager.getAccountsByType(ACCOUNT_TYPE).firstOrNull()
+    private val prefs = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+
+    init {
+        migrateFromAccountManager(context)
+    }
 
     val server: String?
-        get() = account?.let { accountManager.getUserData(it, USERDATA_SERVER_KEY) }
+        get() = prefs.getString(KEY_SERVER, null)
+
+    val username: String?
+        get() = prefs.getString(KEY_USERNAME, null)
 
     val token: String?
-        get() = account?.let { accountManager.peekAuthToken(it, TOKEN_TYPE) }
+        get() = prefs.getString(KEY_TOKEN, null)
 
     val isAuthenticated: Boolean
-        get() = token != null
+        get() = token != null && server != null
 
-    fun storeAccount(server: String, username: String, token: String): Account {
-        // Android keys accounts by (name, type), so there is at most one account per username —
-        // match on the name alone. Matching on server too used to miss the existing account when
-        // the same user re-signed in against a moved server, then addAccountExplicitly returned
-        // false (name+type already exists) without applying the new server, leaving a stale URL
-        // paired with a fresh token that 401s forever.
-        var account = accountManager.getAccountsByType(ACCOUNT_TYPE)
-            .firstOrNull { it.name == username }
+    fun storeAccount(server: String, username: String, token: String) {
+        prefs.edit {
+            putString(KEY_SERVER, server)
+            putString(KEY_USERNAME, username)
+            putString(KEY_TOKEN, token)
+        }
+    }
 
-        if (account == null) {
-            account = Account(username, ACCOUNT_TYPE)
-            val added = accountManager.addAccountExplicitly(
-                account,
-                "",     // We don't keep the password, just the auth token.
-                Bundle().also { it.putString(USERDATA_SERVER_KEY, server) }
-            )
-            if (!added) {
-                Log.w(LOG_MARKER, "addAccountExplicitly returned false for $username")
-            }
+    fun clear() {
+        prefs.edit { clear() }
+    }
+
+    /**
+     * Best-effort copy of credentials out of the legacy AccountManager account, so an update
+     * from an account-backed build keeps its sign-in. The OS purges accounts whose authenticator
+     * disappeared, and it may win the race against this read — in that case the user signs in
+     * once more, which is the acceptable floor.
+     */
+    private fun migrateFromAccountManager(context: Context) {
+        if (prefs.contains(KEY_TOKEN)) {
+            return
         }
 
-        // Always (re)assert the server URL and token so a re-login to a moved server updates the
-        // stored URL instead of keeping the stale one.
-        accountManager.setUserData(account, USERDATA_SERVER_KEY, server)
-        accountManager.setAuthToken(account, TOKEN_TYPE, token)
-
-        return account
+        try {
+            val accountManager = AccountManager.get(context)
+            val account = accountManager.getAccountsByType(LEGACY_ACCOUNT_TYPE).firstOrNull()
+                ?: return
+            val server = accountManager.getUserData(account, LEGACY_SERVER_KEY)
+            val token = accountManager.peekAuthToken(account, LEGACY_TOKEN_TYPE)
+            if (server != null && token != null) {
+                Log.i(LOG_MARKER, "Migrating credentials from AccountManager")
+                storeAccount(server, account.name, token)
+            }
+        } catch (e: Exception) {
+            // Migration is opportunistic; a fresh sign-in recovers from any failure here.
+            Log.w(LOG_MARKER, "Legacy account migration failed", e)
+        }
     }
 }

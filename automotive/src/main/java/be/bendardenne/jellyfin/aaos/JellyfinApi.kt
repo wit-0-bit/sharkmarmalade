@@ -4,6 +4,24 @@ import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.util.AuthorizationHeaderBuilder
 
 /**
+ * True when a failure is transport-level (dead radio, DNS, TLS, timeout) rather than a real
+ * answer from the server. The Jellyfin SDK wraps these in its own exception types with the
+ * IOException somewhere down the cause chain — walk it.
+ */
+fun isNetworkFailure(e: Throwable): Boolean {
+    var cause: Throwable? = e
+    var depth = 0
+    while (cause != null && depth < 8) {
+        if (cause is java.io.IOException) {
+            return true
+        }
+        cause = cause.cause
+        depth++
+    }
+    return false
+}
+
+/**
  * Extension function which applies credentials to a Jellyfin ClientApi and returns
  * the associated headers to use in custom requests.
  */

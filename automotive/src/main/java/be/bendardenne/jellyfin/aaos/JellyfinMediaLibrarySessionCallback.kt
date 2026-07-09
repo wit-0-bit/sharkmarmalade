@@ -148,6 +148,7 @@ class JellyfinMediaLibrarySessionCallback(
      * "Hey Google, play X" or resuming from the head unit without ever opening the app.
      */
     private fun ensureTree(artSize: Int = 512) {
+        syncAuth()
         if (::tree.isInitialized) {
             return
         }
@@ -163,6 +164,29 @@ class JellyfinMediaLibrarySessionCallback(
                         session.notifyChildrenChanged(parentId, itemCount, null)
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Re-applies the stored token to the API client if the two have drifted apart.
+     *
+     * The client's token is only process state: it used to be set solely at service startup and
+     * on the sign-in activity's LOGIN_COMMAND handshake. When that handshake is lost (observed on
+     * the Polestar head unit), the service kept presenting a stale/absent token — every browse
+     * 401'd and the 401→sign-in mapping bounced the user straight back to the sign-in screen
+     * despite a perfectly valid token sitting in account storage. Running this before every
+     * request makes credential propagation pull-based instead of event-based: the handshake is
+     * now just a refresh hint, not a required link.
+     */
+    private fun syncAuth() {
+        val token = accountManager.token ?: return
+        if (jellyfinApi.accessToken != token) {
+            Log.i(LOG_MARKER, "API client token is stale; applying stored credentials")
+            service.applyAuth()
+            if (::tree.isInitialized) {
+                // Cached MediaItems embed stream/art URLs minted under the old credentials.
+                tree.evictCache()
             }
         }
     }
@@ -245,7 +269,9 @@ class JellyfinMediaLibrarySessionCallback(
     }
 
     // Maps a fetch failure to a distinguishable result instead of an opaque failed future: an
-    // expired token (HTTP 401) routes the user back to sign-in; anything else is a generic error.
+    // expired token (HTTP 401) routes the user back to sign-in, a network-level failure says so
+    // (in a car the radio drops constantly; "could not load" reads as a broken app), and anything
+    // else is a generic error.
     private fun <T : Any> errorResult(e: Exception): LibraryResult<T> {
         // Never swallow coroutine cancellation (e.g. the browser disconnecting mid-fetch).
         if (e is kotlinx.coroutines.CancellationException) {
@@ -253,6 +279,15 @@ class JellyfinMediaLibrarySessionCallback(
         }
         if (e is InvalidStatusException && e.status == 401) {
             return authErrorResult()
+        }
+        if (isNetworkFailure(e)) {
+            return LibraryResult.ofError<T>(
+                SessionError(
+                    SessionError.ERROR_IO,
+                    service.getString(R.string.server_unreachable_hint)
+                ),
+                MediaLibraryService.LibraryParams.Builder().build()
+            )
         }
         return LibraryResult.ofError<T>(
             SessionError(SessionError.ERROR_UNKNOWN, service.getString(R.string.could_not_load)),
@@ -800,6 +835,10 @@ class JellyfinMediaLibrarySessionCallback(
         Log.i(LOG_MARKER, "CustomCommand: ${customCommand.customAction}")
         when (customCommand.customAction) {
             LOGIN_COMMAND -> {
+                if (::tree.isInitialized) {
+                    // Cached MediaItems embed stream/art URLs minted under the old credentials.
+                    tree.evictCache()
+                }
                 service.onLogin()
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }

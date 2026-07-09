@@ -72,19 +72,6 @@
             </intent-filter>
         </service>
 
-        <service
-            android:name=".auth.AuthenticatorService"
-            android:exported="true"
-            tools:ignore="ExportedService">
-            <intent-filter>
-                <action android:name="android.accounts.AccountAuthenticator" />
-            </intent-filter>
-
-            <meta-data
-                android:name="android.accounts.AccountAuthenticator"
-                android:resource="@xml/authenticator" />
-        </service>
-
         <provider
             android:name=".AlbumArtContentProvider"
             android:authorities="${applicationId}"

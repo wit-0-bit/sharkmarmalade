@@ -1,6 +1,5 @@
 package be.bendardenne.jellyfin.aaos
 
-import android.accounts.AccountManager
 import android.content.Context
 import dagger.Module
 import dagger.Provides
@@ -33,7 +32,7 @@ class JellyfinHiltModule {
     @Provides
     @Singleton
     fun provideAccountManager(@ApplicationContext appContext: Context): JellyfinAccountManager {
-        return JellyfinAccountManager(AccountManager.get(appContext))
+        return JellyfinAccountManager(appContext)
     }
 }
 

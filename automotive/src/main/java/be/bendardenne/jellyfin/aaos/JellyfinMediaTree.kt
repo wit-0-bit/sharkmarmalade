@@ -23,9 +23,11 @@ import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.SINGLE_PREFIX
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -51,6 +53,39 @@ class JellyfinMediaTree(
 
     companion object {
         private const val REVALIDATION_INTERVAL_MS = 30_000L
+
+        // Foreground fetches get this many extra attempts on transport failures, with a short
+        // growing pause. Bridges the seconds-long radio blips a car sees constantly without
+        // making a genuine outage take much longer to surface (worst case ~2s extra).
+        private const val FETCH_RETRIES = 2
+        private const val RETRY_INITIAL_DELAY_MS = 500L
+    }
+
+    /**
+     * Runs a foreground fetch, retrying transport-level failures. HTTP errors (401 and friends)
+     * are real answers and propagate immediately; only a dead/blipping network is retried.
+     * Background revalidation deliberately doesn't retry — it's throttled and stale-tolerant.
+     */
+    private suspend fun <T> withRetry(what: String, block: suspend () -> T): T {
+        var delayMs = RETRY_INITIAL_DELAY_MS
+        repeat(FETCH_RETRIES) { attempt ->
+            try {
+                return block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!isNetworkFailure(e)) {
+                    throw e
+                }
+                Log.i(
+                    LOG_MARKER,
+                    "Fetch $what failed on attempt ${attempt + 1}, retrying in ${delayMs}ms"
+                )
+                delay(delayMs)
+                delayMs *= 3
+            }
+        }
+        return block()
     }
 
     private val mediaItems: Cache<String, MediaItem> = CacheBuilder.newBuilder()
@@ -111,7 +146,9 @@ class JellyfinMediaTree(
                     // Stream URLs / art URIs are rebuilt by the factory on every create().
                     val cached = diskCache.readItem(id)
                     val dto = cached
-                        ?: api.userLibraryApi.getItem(id.toUUID()).content.also {
+                        ?: withRetry("item:$id") {
+                            api.userLibraryApi.getItem(id.toUUID()).content
+                        }.also {
                             revalidationScope.launch { diskCache.writeItem(it) }
                         }
                     if (cached != null) {
@@ -125,8 +162,12 @@ class JellyfinMediaTree(
 
     suspend fun getChildren(id: String): List<MediaItem> {
         return when (id) {
+            // Artists is deliberately the landing tab: it's disk-cached, so the app opens to
+            // something usable even when the car has no connectivity. Random used to land here
+            // and is deliberately uncached, which made a flaky cell radio look like a broken app.
+            // (Favourites would also cache fine but lands on an empty screen when nothing is
+            // favourited.)
             ROOT_ID -> listOf(
-                getItem(RANDOM_ALBUMS),
                 getItem(ARTISTS),
                 getItem(FAVOURITES),
                 getItem(BROWSE)
@@ -137,7 +178,8 @@ class JellyfinMediaTree(
                 getItem(GENRES),
                 getItem(ALBUMS),
                 getItem(LATEST_ALBUMS),
-                getItem(PLAYLISTS)
+                getItem(PLAYLISTS),
+                getItem(RANDOM_ALBUMS)
             )
 
             LATEST_ALBUMS -> childrenWithCache(id, ::fetchLatestAlbums, ::buildItems)
@@ -175,7 +217,7 @@ class JellyfinMediaTree(
         val cached = diskCache.readChildren(key)
 
         if (cached == null) {
-            val fresh = fetch()
+            val fresh = withRetry(key, fetch)
             revalidationScope.launch { persist(key, fresh) }
             return build(fresh)
         }
@@ -313,12 +355,14 @@ class JellyfinMediaTree(
     // Deliberately not disk-cached: a Random tab that silently reshuffles under the user is worse
     // than a spinner, and caching randomness defeats its purpose.
     private suspend fun getRandomAlbums(): List<MediaItem> {
-        val response = api.itemsApi.getItems(
-            includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
-            recursive = true,
-            sortBy = listOf(ItemSortBy.RANDOM),
-            limit = maxItemsPerPage
-        )
+        val response = withRetry(RANDOM_ALBUMS) {
+            api.itemsApi.getItems(
+                includeItemTypes = listOf(BaseItemKind.MUSIC_ALBUM),
+                recursive = true,
+                sortBy = listOf(ItemSortBy.RANDOM),
+                limit = maxItemsPerPage
+            )
+        }
 
         return response.content.items.mapNotNull { buildItem(it) }
     }
@@ -460,7 +504,9 @@ class JellyfinMediaTree(
             )
 
 
-    suspend fun search(query: String): List<MediaItem> {
+    // The whole search is wrapped in one retry: the individual queries are idempotent reads and
+    // re-running the cheap ones after a blip is simpler than tracking partial progress.
+    suspend fun search(query: String): List<MediaItem> = withRetry("search") {
         val items = mutableListOf<MediaItem>()
 
         var response = api.artistsApi.getAlbumArtists(
@@ -508,7 +554,7 @@ class JellyfinMediaTree(
             buildItem(it, context.getString(R.string.tracks))?.let(::asSingle)
         })
 
-        return items
+        items
     }
 
     /**

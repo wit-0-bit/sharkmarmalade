@@ -25,17 +25,13 @@ android {
         // Diverges from the namespace deliberately: upstream owns be.bendardenne.jellyfin.aaos
         // on Google Play, and this fork needs its own id to reach a real car through a Play
         // closed-testing track (and to coexist with the upstream app). The ContentProvider
-        // authority and account type follow it via BuildConfig.APPLICATION_ID and the
-        // account_type resValue below.
+        // authority follows it via ${applicationId} in the manifest and
+        // BuildConfig.APPLICATION_ID in code.
         applicationId = "elizardbeth.finale"
         minSdk = 29
         targetSdk = 35
-        versionCode = 42
-        versionName = "1.4"
-
-        // authenticator.xml can't use manifest placeholders, so the account type is injected
-        // as a string resource instead.
-        resValue("string", "account_type", applicationId!!)
+        versionCode = 43
+        versionName = "1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

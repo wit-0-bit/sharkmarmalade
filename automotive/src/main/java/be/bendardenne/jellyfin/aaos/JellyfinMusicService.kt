@@ -1,6 +1,5 @@
 package be.bendardenne.jellyfin.aaos
 
-import android.accounts.AccountManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -68,7 +67,7 @@ class JellyfinMusicService : MediaLibraryService() {
 
         Log.i(LOG_MARKER, "onCreate")
 
-        accountManager = JellyfinAccountManager(AccountManager.get(applicationContext))
+        accountManager = JellyfinAccountManager(applicationContext)
         jellyfinApi = jellyfin.createApi()
         mediaSourceFactory = DefaultMediaSourceFactory(this)
 
@@ -130,6 +129,23 @@ class JellyfinMusicService : MediaLibraryService() {
     }
 
     fun onLogin() {
+        applyAuth()
+
+        // Trigger a refresh upon login.
+        mediaLibrarySession.notifyChildrenChanged(ROOT_ID, 3, null)
+    }
+
+    /**
+     * (Re)applies the stored credentials to the API client and the streaming data source.
+     *
+     * This must be callable at any time, not just at login: the API client's token is process
+     * state, while the stored account is persistent, and the two can drift — e.g. when the
+     * sign-in activity's LOGIN_COMMAND handshake is lost (seen on the Polestar head unit), the
+     * fresh token lands in account storage while the service keeps browsing with the token it
+     * had at startup, and the server 401s everything. The session callback re-syncs via this
+     * before serving requests, so a stale client token can never outlive one browse call.
+     */
+    fun applyAuth() {
         val headers = jellyfinApi.auth(accountManager)
 
         val authedFactory = DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers)
@@ -140,9 +156,6 @@ class JellyfinMusicService : MediaLibraryService() {
             // A cache I/O problem should degrade to plain network, not fail playback.
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         mediaSourceFactory.setDataSourceFactory(cachedFactory)
-
-        // Trigger a refresh upon login.
-        mediaLibrarySession.notifyChildrenChanged(ROOT_ID, 4, null)
     }
 
     private suspend fun reportPlayback(player: Player) {
