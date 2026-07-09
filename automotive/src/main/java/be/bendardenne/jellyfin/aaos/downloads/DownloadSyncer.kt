@@ -1,11 +1,20 @@
 package be.bendardenne.jellyfin.aaos.downloads
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
+import androidx.preference.PreferenceManager
 import be.bendardenne.jellyfin.aaos.JellyfinAccountManager
 import be.bendardenne.jellyfin.aaos.MediaItemFactory.Companion.TRANSCODE_BITRATE
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
+import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_DOWNLOAD_WIFI_ONLY
 import be.bendardenne.jellyfin.aaos.auth
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okio.buffer
@@ -34,10 +43,25 @@ import java.util.concurrent.atomic.AtomicBoolean
  * something unplayable.
  */
 class DownloadSyncer(
+    context: Context,
     private val api: ApiClient,
     private val accountManager: JellyfinAccountManager,
     private val store: DownloadStore,
 ) {
+
+    private val appContext = context.applicationContext
+
+    // Process-lifetime scope, deliberately NOT tied to the media service: the service is
+    // destroyed the moment its last controller unbinds (e.g. Settings' fire-and-forget "Sync
+    // now" command), and a service-owned scope cancelled a sync milliseconds after it started.
+    // A mid-run process death is survivable — the incremental index keeps finished tracks
+    // visible and the next sync resumes where this one stopped.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Fire-and-forget entry point for service triggers (login, network back, periodic, UI). */
+    fun requestSync(force: Boolean = false) {
+        scope.launch { syncIfDue(force) }
+    }
 
     companion object {
         const val COLLECTION_NAME = "finale-downloads"
@@ -67,6 +91,10 @@ class DownloadSyncer(
         if (!accountManager.isAuthenticated) {
             return
         }
+        if (wifiOnly() && !onWifi()) {
+            Log.i(LOG_MARKER, "Download sync skipped: WiFi-only is set and not on WiFi")
+            return
+        }
         if (!force && System.currentTimeMillis() - lastSyncAt < SYNC_INTERVAL_MS) {
             return
         }
@@ -76,6 +104,7 @@ class DownloadSyncer(
         try {
             sync()
             lastSyncAt = System.currentTimeMillis()
+            store.recordSync()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -88,6 +117,10 @@ class DownloadSyncer(
     }
 
     private suspend fun sync() {
+        // Refresh baseUrl/token from storage: this ApiClient is the syncer's own (the singleton
+        // outlives any service instance), so credentials are pulled, not pushed.
+        api.auth(accountManager)
+
         val collection = findCollection()
         if (collection == null) {
             // Deliberately NOT treated as "evict everything": a missing collection is far more
@@ -167,18 +200,37 @@ class DownloadSyncer(
             return indexTracks.size
         }
 
-        // Download what's missing, oldest-in-collection first, within budget.
+        // Download what's missing, oldest-in-collection first, within budget. Two independent
+        // brakes: the user-configured limit, and a hard floor of free space on the head unit's
+        // volume (we don't know how much disk the car actually has — log it so an uploaded log
+        // answers that).
+        val budget = store.maxBytes()
         var totalBytes = store.totalBytes()
         var downloaded = 0
         var failed = 0
         var capped = false
+        Log.i(
+            LOG_MARKER,
+            "Download sync starting: ${totalBytes / 1_000_000} MB used, " +
+                    "budget ${budget / 1_000_000} MB, " +
+                    "free space ${store.freeBytes() / 1_000_000} MB"
+        )
         val headers = api.auth(accountManager)
         for (id in desiredTracks.keys) {
             if (store.localTrack(id) != null) {
                 continue
             }
-            if (totalBytes >= DownloadStore.MAX_DOWNLOAD_BYTES) {
+            if (totalBytes >= budget) {
                 capped = true
+                Log.w(LOG_MARKER, "Download budget (${budget / 1_000_000} MB) reached; stopping")
+                break
+            }
+            if (store.freeBytes() < DownloadStore.MIN_FREE_BYTES) {
+                capped = true
+                Log.w(
+                    LOG_MARKER,
+                    "Free space low (${store.freeBytes() / 1_000_000} MB); stopping downloads"
+                )
                 break
             }
             val bytes = downloadTrack(id, headers)
@@ -193,13 +245,6 @@ class DownloadSyncer(
                 failed++
             }
         }
-        if (capped) {
-            Log.w(
-                LOG_MARKER,
-                "Download budget (${DownloadStore.MAX_DOWNLOAD_BYTES} bytes) reached; " +
-                        "remaining collection items skipped"
-            )
-        }
 
         val indexedTracks = writeCurrentIndex()
         val changed = evicted.isNotEmpty() || downloaded > 0
@@ -212,6 +257,16 @@ class DownloadSyncer(
         if (changed) {
             onDownloadsChanged?.invoke()
         }
+    }
+
+    private fun wifiOnly(): Boolean =
+        PreferenceManager.getDefaultSharedPreferences(appContext)
+            .getBoolean(PREF_DOWNLOAD_WIFI_ONLY, false)
+
+    private fun onWifi(): Boolean {
+        val cm = appContext.getSystemService(ConnectivityManager::class.java) ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 
     private suspend fun findCollection(): BaseItemDto? =

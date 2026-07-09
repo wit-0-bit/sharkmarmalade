@@ -26,6 +26,24 @@ class SettingsFragment : PreferenceFragmentCompat() {
             viewModel.sendLogs()
             true
         }
+
+        findPreference<Preference>("sync_downloads")?.onPreferenceClickListener =
+            Preference.OnPreferenceClickListener {
+                viewModel.syncDownloadsNow()
+                true
+            }
+
+        updateDownloadStatus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Refresh counts/sizes when returning to the screen (e.g. after a sync ran).
+        updateDownloadStatus()
+    }
+
+    private fun updateDownloadStatus() {
+        findPreference<Preference>("download_status")?.summary = viewModel.downloadStatusSummary()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {

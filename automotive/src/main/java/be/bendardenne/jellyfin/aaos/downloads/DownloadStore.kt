@@ -2,8 +2,11 @@ package be.bendardenne.jellyfin.aaos.downloads
 
 import android.content.Context
 import android.util.Log
+import androidx.core.content.edit
+import androidx.preference.PreferenceManager
 import be.bendardenne.jellyfin.aaos.JellyfinAccountManager
 import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
+import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.PREF_DOWNLOAD_LIMIT
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import org.jellyfin.sdk.model.api.BaseItemDto
@@ -29,11 +32,20 @@ import java.security.MessageDigest
 class DownloadStore(context: Context, private val accountManager: JellyfinAccountManager) {
 
     companion object {
-        // Owner-sized: ~1300 tracks at AAC-256 (~2 MB/min). Generous but not greedy.
-        const val MAX_DOWNLOAD_BYTES = 10L * 1024 * 1024 * 1024
+        // Default limit: ~1300 tracks at AAC-256 (~2 MB/min). Generous but not greedy.
+        // User-adjustable via the Settings "Download limit" preference.
+        const val DEFAULT_MAX_DOWNLOAD_BYTES = 10L * 1024 * 1024 * 1024
+
+        // Never fill the head unit's disk: stop downloading when the volume gets this low,
+        // regardless of the configured limit.
+        const val MIN_FREE_BYTES = 1L * 1024 * 1024 * 1024
     }
 
     private val appContext = context.applicationContext
+
+    // Separate file: syncer status writes must not fire the default-prefs change listener.
+    private val statusPrefs =
+        appContext.getSharedPreferences("downloads_status", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
     private val listSerializer = ListSerializer(BaseItemDto.serializer())
 
@@ -170,4 +182,25 @@ class DownloadStore(context: Context, private val accountManager: JellyfinAccoun
     fun deleteTrack(trackId: String) {
         trackFile(trackId)?.delete()
     }
+
+    // ---- Budget / status (shown in Settings, enforced by the syncer) ----
+
+    /** The user-configured download budget, defaulting to 10 GB. */
+    fun maxBytes(): Long =
+        PreferenceManager.getDefaultSharedPreferences(appContext)
+            .getString(PREF_DOWNLOAD_LIMIT, null)
+            ?.toLongOrNull()
+            ?: DEFAULT_MAX_DOWNLOAD_BYTES
+
+    /** Usable space on the volume the downloads live on. */
+    fun freeBytes(): Long = appContext.filesDir.usableSpace
+
+    fun trackCount(): Int = downloadedTrackIds().size
+
+    fun recordSync() {
+        statusPrefs.edit { putLong("lastSyncAt", System.currentTimeMillis()) }
+    }
+
+    /** Epoch millis of the last successful sync, or 0 if never. */
+    fun lastSyncAt(): Long = statusPrefs.getLong("lastSyncAt", 0)
 }

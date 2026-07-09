@@ -59,6 +59,7 @@ class JellyfinMediaLibrarySessionCallback(
 
     companion object {
         const val LOGIN_COMMAND = "be.bendardenne.jellyfin.aaos.COMMAND.LOGIN"
+        const val SYNC_DOWNLOADS_COMMAND = "be.bendardenne.jellyfin.aaos.COMMAND.SYNC_DOWNLOADS"
         const val REPEAT_COMMAND = "be.bendardenne.jellyfin.aaos.COMMAND.REPEAT"
         const val SHUFFLE_COMMAND = "be.bendardenne.jellyfin.aaos.COMMAND.SHUFFLE"
 
@@ -111,6 +112,7 @@ class JellyfinMediaLibrarySessionCallback(
         val sessionCommands = connectionResult.availableSessionCommands
             .buildUpon()
             .add(SessionCommand(LOGIN_COMMAND, Bundle()))
+            .add(SessionCommand(SYNC_DOWNLOADS_COMMAND, Bundle()))
             .add(SessionCommand(REPEAT_COMMAND, Bundle()))
             .add(SessionCommand(SHUFFLE_COMMAND, Bundle()))
             .build()
@@ -835,6 +837,11 @@ class JellyfinMediaLibrarySessionCallback(
     ): ListenableFuture<SessionResult> {
         Log.i(LOG_MARKER, "CustomCommand: ${customCommand.customAction}")
         when (customCommand.customAction) {
+            SYNC_DOWNLOADS_COMMAND -> {
+                service.requestDownloadSync()
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+
             LOGIN_COMMAND -> {
                 if (::tree.isInitialized) {
                     // Cached MediaItems embed stream/art URLs minted under the old credentials.

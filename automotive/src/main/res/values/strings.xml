@@ -38,5 +38,18 @@
     <string name="about">About</string>
     <string name="app_version">App version</string>
     <string name="upload_logs">Upload logs to Jellyfin server</string>
+    <string name="downloads">Downloads</string>
+    <string name="download_status">Download status</string>
+    <string name="download_status_summary">%1$d tracks · %2$s used · %3$s free on device · synced %4$s</string>
+    <string name="download_status_never">never</string>
+    <string name="download_limit">Download limit</string>
+    <!-- 10 GB in bytes. A literal android:defaultValue in preferences.xml gets parsed as a
+         32-bit int by AAPT and overflows, silently selecting the first entry (2 GB) instead;
+         routing it through a string resource keeps it a string. -->
+    <string name="download_limit_default" translatable="false">10737418240</string>
+    <string name="download_wifi_only">Download on WiFi only</string>
+    <string name="download_wifi_only_summary">Pause download sync unless the car is on WiFi</string>
+    <string name="sync_downloads_now">Sync downloads now</string>
+    <string name="sync_requested">Download sync requested</string>
     <string name="log_uploaded">Logfile uploaded to server</string>
 </resources>

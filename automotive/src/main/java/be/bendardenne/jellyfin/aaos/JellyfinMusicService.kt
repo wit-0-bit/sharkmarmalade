@@ -1,5 +1,7 @@
 package be.bendardenne.jellyfin.aaos
 
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -28,11 +30,6 @@ import be.bendardenne.jellyfin.aaos.SharkMarmaladeConstants.LOG_MARKER
 import be.bendardenne.jellyfin.aaos.downloads.DownloadStore
 import be.bendardenne.jellyfin.aaos.downloads.DownloadSyncer
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import org.jellyfin.sdk.Jellyfin
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.playStateApi
@@ -46,17 +43,19 @@ class JellyfinMusicService : MediaLibraryService() {
     @Inject
     lateinit var jellyfin: Jellyfin
 
+    // Process-scoped singletons: downloads must survive this service's (frequent, controller-
+    // driven) destruction.
+    @Inject
+    lateinit var downloadStore: DownloadStore
+
+    @Inject
+    lateinit var downloadSyncer: DownloadSyncer
+
     private lateinit var accountManager: JellyfinAccountManager
     private lateinit var jellyfinApi: ApiClient
     private lateinit var mediaSourceFactory: DefaultMediaSourceFactory
     private lateinit var mediaLibrarySession: MediaLibrarySession
     private lateinit var callback: JellyfinMediaLibrarySessionCallback
-    lateinit var downloadStore: DownloadStore
-        private set
-    private lateinit var downloadSyncer: DownloadSyncer
-
-    // IO work owned by the service (download sync); cancelled with the service.
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val handler: Handler = Handler(Looper.getMainLooper())
     private var currentPlaybackTime: Long = 0;
@@ -88,8 +87,6 @@ class JellyfinMusicService : MediaLibraryService() {
         jellyfinApi = jellyfin.createApi()
         mediaSourceFactory = DefaultMediaSourceFactory(this)
 
-        downloadStore = DownloadStore(applicationContext, accountManager)
-        downloadSyncer = DownloadSyncer(jellyfinApi, accountManager, downloadStore)
         downloadSyncer.onDownloadsChanged = {
             handler.post {
                 // Only subscribed parents actually refresh; the rest are ignored by media3.
@@ -127,10 +124,30 @@ class JellyfinMusicService : MediaLibraryService() {
         // reach the car within a sync interval of driving. syncIfDue self-throttles.
         handler.postDelayed(object : Runnable {
             override fun run() {
-                serviceScope.launch { downloadSyncer.syncIfDue() }
+                downloadSyncer.requestSync()
                 handler.postDelayed(this, 5 * 60_000L)
             }
         }, 5 * 60_000L)
+
+        // The car's radio comes and goes; sync in whatever connectivity windows appear instead
+        // of waiting for the next periodic tick.
+        try {
+            getSystemService(ConnectivityManager::class.java)
+                ?.registerDefaultNetworkCallback(networkCallback)
+        } catch (e: Exception) {
+            Log.w(LOG_MARKER, "Could not register network callback", e)
+        }
+    }
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            downloadSyncer.requestSync()
+        }
+    }
+
+    /** Settings' "Sync now" lands here via the SYNC_DOWNLOADS custom session command. */
+    fun requestDownloadSync() {
+        downloadSyncer.requestSync(force = true)
     }
 
     private fun pollForPlaybackStatus(player: ExoPlayer) {
@@ -163,7 +180,14 @@ class JellyfinMusicService : MediaLibraryService() {
         mediaLibrarySession.player.release()
         handler.removeCallbacks(playbackPoll)
         handler.removeCallbacksAndMessages(null)
-        serviceScope.cancel()
+        try {
+            getSystemService(ConnectivityManager::class.java)
+                ?.unregisterNetworkCallback(networkCallback)
+        } catch (e: Exception) {
+            // Never registered (or already gone); nothing to clean up.
+        }
+        // The syncer outlives this service; don't leave it notifying a released session.
+        downloadSyncer.onDownloadsChanged = null
         super.onDestroy()
     }
 
@@ -174,7 +198,7 @@ class JellyfinMusicService : MediaLibraryService() {
         mediaLibrarySession.notifyChildrenChanged(ROOT_ID, 3, null)
 
         // Reconcile downloads whenever credentials (re)land. Throttled internally.
-        serviceScope.launch { downloadSyncer.syncIfDue() }
+        downloadSyncer.requestSync()
     }
 
     /**

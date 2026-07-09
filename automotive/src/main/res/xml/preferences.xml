@@ -12,6 +12,29 @@
 
     </PreferenceCategory>
 
+    <PreferenceCategory android:title="@string/downloads">
+        <Preference
+            android:key="download_status"
+            android:persistent="false"
+            android:title="@string/download_status" />
+        <DropDownPreference
+            android:key="download_limit"
+            android:entries="@array/downloadLimit"
+            android:entryValues="@array/downloadLimitValues"
+            android:defaultValue="@string/download_limit_default"
+            android:summary="%s"
+            android:title="@string/download_limit" />
+        <SwitchPreferenceCompat
+            android:key="download_wifi_only"
+            android:defaultValue="false"
+            android:summary="@string/download_wifi_only_summary"
+            android:title="@string/download_wifi_only" />
+        <Preference
+            android:key="sync_downloads"
+            android:persistent="false"
+            android:title="@string/sync_downloads_now" />
+    </PreferenceCategory>
+
     <PreferenceCategory android:title="@string/about">
         <Preference
             android:key="upload_logs"

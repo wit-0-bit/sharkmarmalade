@@ -176,6 +176,18 @@ and built ENTIRELY from the local index: one downloaded album of a 35-album arti
 artist containing exactly that album (owner requirement). Node ids are context-prefixed
 (`DOWNLOADED_ARTIST:`/`DOWNLOADED_ALBUM:`) so RAM-cached server-context nodes don't collide.
 
+**Hardening (same session):** sync is also triggered by a `registerDefaultNetworkCallback`
+(connectivity windows in the car are precious — don't wait for the periodic tick); downloads stop
+when device free space < 1 GB (`MIN_FREE_BYTES`) regardless of budget, and the sync-start log
+line records used/budget/free so an uploaded car log reveals the head unit's real disk; the
+budget is user-settable (Settings → Download limit, 2–50 GB, default 10 — the XML default MUST
+stay a `@string` resource: a literal `android:defaultValue` overflows AAPT's 32-bit int parse and
+silently selects the first entry); optional "Download on WiFi only" switch (default off); a
+Settings "Download status" row (tracks · used · free · last-sync, refreshed onResume) + "Sync
+downloads now" (SYNC_DOWNLOADS custom session command → `service.requestDownloadSync()`);
+`AudioCache` floors the quota at 256 MB (the car grants 64 MB); Upload Logs now captures
+`AndroidRuntime:E` + `ExoPlayer*:E` alongside the app tag so in-car crashes are diagnosable.
+
 **Local-first playback**: `MediaItemFactory.forTrack` takes a `localTrack` resolver — a
 downloaded track plays from `file://` (MIME `audio/mp4`, not HLS) no matter where it was tapped
 (any tab, search, voice); streaming is the fallback. The service's data source chain is wrapped
