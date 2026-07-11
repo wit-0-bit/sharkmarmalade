@@ -4,7 +4,7 @@ Personal fork of [Shark Marmalade](https://github.com/bendardenne/sharkmarmalade
 Jellyfin music client for Android Automotive OS (AAOS). GPL-2.0. **Not intended for upstreaming or
 publishing** — the audience is the owner's own Polestar 3 and Jellyfin server (whose ffmpeg has
 `libfdk_aac`, verified via ssh), so design decisions optimize for that setup, not a general user
-base. Remotes: `origin` = wit-0-bit/sharkmarmalade (the fork), `upstream` = bendardenne.
+base. Remotes: `origin` = lizwin/sharkmarmalade (the fork), `upstream` = bendardenne.
 
 **Identity (2026-07-05 → renamed to Finale 2026-07-06):** `applicationId = elizardbeth.finale`,
 display name **Finale** (was Dorsal; the name is `@string/app_name`, which *also* becomes the
